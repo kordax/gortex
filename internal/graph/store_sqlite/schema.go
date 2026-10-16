@@ -443,6 +443,7 @@ CREATE TABLE IF NOT EXISTS analysis_process_steps (
 ) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS analysis_process_steps_by_node
     ON analysis_process_steps(generation_id, node_rowid, process_id);
+` + analysisStepsNodeForeignKeyIndexDDL + `;
 
 CREATE TABLE IF NOT EXISTS analysis_concepts (
     generation_id INTEGER NOT NULL
@@ -474,6 +475,22 @@ CREATE TABLE IF NOT EXISTS analysis_blobs (
     PRIMARY KEY (generation_id, component)
 ) WITHOUT ROWID;
 `
+
+// Child-key indexes support SQLite's foreign-key probes during parent deletion.
+// The generation-leading index cannot seek node_rowid alone. The catalog's
+// partial primary/building indexes omit children that still enforce their FK.
+// Reuse the maintenance names to avoid duplicating manually repaired indexes.
+const (
+	analysisStepsNodeForeignKeyIndexDDL     = `CREATE INDEX IF NOT EXISTS maintenance_analysis_steps_node_rowid ON analysis_process_steps(node_rowid)`
+	refViewBuildsForeignKeyIndexDDL         = `CREATE INDEX IF NOT EXISTS maintenance_ref_view_builds_ref_view_id ON ref_view_builds(ref_view_id)`
+	dedicatedGraphsFamilyForeignKeyIndexDDL = `CREATE INDEX IF NOT EXISTS maintenance_dedicated_graphs_family_id ON dedicated_graphs(family_id)`
+)
+
+var foreignKeyChildIndexDDL = []string{
+	analysisStepsNodeForeignKeyIndexDDL,
+	refViewBuildsForeignKeyIndexDDL,
+	dedicatedGraphsFamilyForeignKeyIndexDDL,
+}
 
 // checkoutCatalogSchemaSQL is the checkout-lifecycle control plane: which
 // working copies the daemon knows about, what it intends to do with each one,
@@ -628,6 +645,7 @@ CREATE TABLE IF NOT EXISTS dedicated_graphs (
 -- of a family do not collide with each other.
 CREATE UNIQUE INDEX IF NOT EXISTS dedicated_graphs_primary_base
     ON dedicated_graphs(family_id) WHERE is_primary_base = 1;
+` + dedicatedGraphsFamilyForeignKeyIndexDDL + `;
 
 -- An immutable-once-ready build of a view. Named view_generations rather than
 -- "generations" so it cannot be confused with the analysis_generations cache,
@@ -754,6 +772,7 @@ CREATE TABLE IF NOT EXISTS ref_view_builds (
 CREATE UNIQUE INDEX IF NOT EXISTS ref_view_builds_single_inflight
     ON ref_view_builds(ref_view_id, desired_tree, base_generation_id, build_fingerprint)
     WHERE state = 'building';
+` + refViewBuildsForeignKeyIndexDDL + `;
 
 -- Deferred deletion work. Targets are recorded as an opaque encoded list,
 -- never as foreign keys: the whole point of the journal is to survive the

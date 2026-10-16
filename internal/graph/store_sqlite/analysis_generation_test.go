@@ -630,6 +630,17 @@ func TestAnalysisGenerationQueryPlansUseBoundedIndexes(t *testing.T) {
 		}
 		rows.Close()
 		plan := strings.Join(details, " | ")
+		if index == "analysis_process_steps_by_node" {
+			// The node-leading FK index also carries the WITHOUT ROWID primary
+			// key suffix (generation_id, process_id, ordinal). Either ordering
+			// can seek both equalities and return process_id without a sort.
+			if !strings.Contains(plan, "SEARCH analysis_process_steps USING COVERING INDEX ") ||
+				!strings.Contains(plan, "generation_id=?") || !strings.Contains(plan, "node_rowid=?") ||
+				strings.Contains(plan, "USE TEMP B-TREE") {
+				t.Fatalf("process-step plan must seek both keys and preserve order: %s", plan)
+			}
+			continue
+		}
 		if !strings.Contains(plan, index) {
 			t.Fatalf("plan for %s did not use index: %s", index, plan)
 		}
