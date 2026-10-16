@@ -674,12 +674,12 @@ func generationWriteCases() []generationWriteCase {
 			seed: func(t *testing.T, base, derived *Store) {
 				addToBothGenerations(base, derived, func() ([]*graph.Node, []*graph.Edge) {
 					return []*graph.Node{{
-							ID: genWriteConfigKey, Kind: graph.KindConfigKey, Name: "server.port",
-							FilePath: "repo::pkg/app.yaml", RepoPrefix: genWriteRepo,
-						}}, []*graph.Edge{{
-							From: genWriteCaller, To: genWriteConfigKey, Kind: graph.EdgeReads,
-							FilePath: genWriteCallerFile, Line: 8,
-						}}
+						ID: genWriteConfigKey, Kind: graph.KindConfigKey, Name: "server.port",
+						FilePath: "repo::pkg/app.yaml", RepoPrefix: genWriteRepo,
+					}}, []*graph.Edge{{
+						From: genWriteCaller, To: genWriteConfigKey, Kind: graph.EdgeReads,
+						FilePath: genWriteCallerFile, Line: 8,
+					}}
 				})
 			},
 			disturb: func(t *testing.T, s *Store) {
@@ -725,24 +725,24 @@ func generationWriteCases() []generationWriteCase {
 			seed: func(t *testing.T, base, derived *Store) {
 				addToBothGenerations(base, derived, func() ([]*graph.Node, []*graph.Edge) {
 					return []*graph.Node{
-							{
-								ID: genWriteBridge, Kind: graph.KindContractBridge, Name: "Bridge",
-								FilePath: "repo::pkg/bridge.go", RepoPrefix: genWriteRepo,
-							},
-							{
-								ID: genWriteTopic, Kind: graph.KindTopic, Name: "Topic",
-								FilePath: "repo::pkg/topic.go", RepoPrefix: genWriteRepo,
-							},
-						}, []*graph.Edge{
-							{
-								From: genWriteCaller, To: genWriteBridge, Kind: graph.EdgeReferences,
-								FilePath: genWriteCallerFile, Line: 6,
-							},
-							{
-								From: genWriteCaller, To: genWriteTopic, Kind: graph.EdgeProducesTopic,
-								FilePath: genWriteCallerFile, Line: 7,
-							},
-						}
+						{
+							ID: genWriteBridge, Kind: graph.KindContractBridge, Name: "Bridge",
+							FilePath: "repo::pkg/bridge.go", RepoPrefix: genWriteRepo,
+						},
+						{
+							ID: genWriteTopic, Kind: graph.KindTopic, Name: "Topic",
+							FilePath: "repo::pkg/topic.go", RepoPrefix: genWriteRepo,
+						},
+					}, []*graph.Edge{
+						{
+							From: genWriteCaller, To: genWriteBridge, Kind: graph.EdgeReferences,
+							FilePath: genWriteCallerFile, Line: 6,
+						},
+						{
+							From: genWriteCaller, To: genWriteTopic, Kind: graph.EdgeProducesTopic,
+							FilePath: genWriteCallerFile, Line: 7,
+						},
+					}
 				})
 			},
 			disturb: func(t *testing.T, s *Store) {
@@ -915,13 +915,13 @@ func generationWriteContractMaterial() ([]*graph.Node, []*graph.Edge) {
 	// This canonical belongs only to the owner edge below. Its different
 	// file path must not imply a separate, surviving legacy scalar record.
 	return []*graph.Node{{
-			ID: genWriteContract, Kind: graph.KindContract, Name: "Contract",
-			FilePath: "repo::pkg/contract.go", RepoPrefix: genWriteRepo,
-			Meta: map[string]any{"contract_owner_record": true},
-		}}, []*graph.Edge{{
-			From: genWriteCaller, To: genWriteContract, Kind: graph.EdgeProvides,
-			FilePath: genWriteCallerFile, Line: 5,
-		}}
+		ID: genWriteContract, Kind: graph.KindContract, Name: "Contract",
+		FilePath: "repo::pkg/contract.go", RepoPrefix: genWriteRepo,
+		Meta: map[string]any{"contract_owner_record": true},
+	}}, []*graph.Edge{{
+		From: genWriteCaller, To: genWriteContract, Kind: graph.EdgeProvides,
+		FilePath: genWriteCallerFile, Line: 5,
+	}}
 }
 
 // TestGenerationScopedWriterFamilies drives every remaining scoped writer
@@ -937,11 +937,12 @@ func TestGenerationScopedWriterFamilies(t *testing.T) {
 // the isolation proof for a mutating capability, so they have to stay bound to
 // something that actually runs.
 var generationWriteFences = map[string]func(t *testing.T){
-	"TestGenerationScopedEdgeAttributeUpdate":  TestGenerationScopedEdgeAttributeUpdate,
-	"TestGenerationScopedEdgeProvenanceUpdate": TestGenerationScopedEdgeProvenanceUpdate,
-	"TestGenerationScopedExactEdgeDelete":      TestGenerationScopedExactEdgeDelete,
-	"TestGenerationScopedFileEvict":            TestGenerationScopedFileEvict,
-	"TestGenerationScopedReceiverRebind":       TestGenerationScopedReceiverRebind,
+	"TestGenerationScopedEdgeAttributeUpdate":                  TestGenerationScopedEdgeAttributeUpdate,
+	"TestGenerationScopedEdgeProvenanceUpdate":                 TestGenerationScopedEdgeProvenanceUpdate,
+	"TestGenerationScopedExactEdgeDelete":                      TestGenerationScopedExactEdgeDelete,
+	"TestGenerationScopedFileEvict":                            TestGenerationScopedFileEvict,
+	"TestGenerationScopedReceiverRebind":                       TestGenerationScopedReceiverRebind,
+	"TestReplaceFilesInitialPublicationAndGenerationIsolation": TestReplaceFilesInitialPublicationAndGenerationIsolation,
 }
 
 // generationWriteFenceNames is every name a capability may cite: the standalone

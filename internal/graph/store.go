@@ -677,6 +677,25 @@ type FileBatchEvicter interface {
 	EvictFiles(filePaths []string) (nodesRemoved, edgesRemoved int)
 }
 
+// FileBatchReplacement publishes parsed files together with their symbol
+// documents. Symbols is the complete searchable set for the replacement;
+// contracts retained by other file owners keep their existing documents.
+type FileBatchReplacement struct {
+	FilePaths []string
+	Nodes     []*Node
+	Edges     []*Edge
+	Symbols   []SymbolFTSItem
+}
+
+// FileBatchReplacer retires old file nodes and publishes their replacements
+// and symbol FTS in one transaction. Concurrent readers see the old or new
+// corpus, never a gap between eviction, insertion and FTS publication.
+// A failure leaves the previous corpus intact. This optional capability
+// retains the compatibility path for backends without atomic replacement.
+type FileBatchReplacer interface {
+	ReplaceFiles(replacement FileBatchReplacement) error
+}
+
 // ContentHit is one result from a ContentSearcher query: the content
 // section node's ID plus locating metadata (file + ordinal), its BM25
 // relevance score (higher = more relevant), and a short snippet excerpt

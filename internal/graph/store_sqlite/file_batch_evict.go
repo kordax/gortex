@@ -79,6 +79,10 @@ func (s *Store) evictByPredicate(predicate string, arg any, scope evictScope) (n
 // the receipt can stay complete instead of forcing the whole-graph fallback
 // resolve.
 func (s *Store) evictByPredicateResult(predicate string, arg any, scope evictScope) (nodesRemoved, edgesRemoved int, retErr error) {
+	return s.evictByPredicateWithReplacement(predicate, arg, scope, nil)
+}
+
+func (s *Store) evictByPredicateWithReplacement(predicate string, arg any, scope evictScope, replacement *graph.FileBatchReplacement) (nodesRemoved, edgesRemoved int, retErr error) {
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
 
@@ -127,7 +131,7 @@ func (s *Store) evictByPredicateResult(predicate string, arg any, scope evictSco
 	if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM nodes WHERE `+scoped+` LIMIT 1)`, scopeArgs...).Scan(&hasCandidates); err != nil {
 		return 0, 0, err
 	}
-	if !hasCandidates {
+	if !hasCandidates && replacement == nil {
 		if err := tx.Commit(); err != nil {
 			return 0, 0, err
 		}
@@ -200,6 +204,11 @@ func (s *Store) evictByPredicateResult(predicate string, arg any, scope evictSco
 			receiptDelta = delta
 		}
 	}
+	if replacement != nil {
+		if err := s.deleteReplacementSymbolFTSTx(tx, scoped, scopeArgs); err != nil {
+			return 0, 0, err
+		}
+	}
 	scalarChanges, ownerEdgesRemoved, err := s.applyContractFileEvictionTx(tx, plan)
 	if err != nil {
 		return 0, 0, err
@@ -227,7 +236,14 @@ func (s *Store) evictByPredicateResult(predicate string, arg any, scope evictSco
 		return 0, 0, err
 	}
 	nodesRemoved = int(removed)
-	changed := nodesRemoved > 0 || edgesRemoved > 0 || scalarChanges > 0
+	replacementChanges := 0
+	if replacement != nil {
+		replacementChanges, err = s.insertFileReplacementTx(tx, *replacement, receiptDelta)
+		if err != nil {
+			return 0, 0, err
+		}
+	}
+	changed := nodesRemoved > 0 || edgesRemoved > 0 || scalarChanges > 0 || replacementChanges > 0
 	invalidatedAnalysis := false
 	if changed && s.analysisGenerationPresent {
 		if err := invalidateAnalysisGenerationTx(tx); err != nil {

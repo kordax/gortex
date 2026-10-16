@@ -2,6 +2,8 @@ package indexer
 
 import (
 	"errors"
+	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"sort"
@@ -303,11 +305,19 @@ func (idx *Indexer) reindexIncrementalChunk(
 		zap.Int("inert_files", plan.InertFiles), zap.Int("read_failed_files", len(readFailed)),
 		zap.Int("fallback_files", len(fallbacks)), zap.Int("nodes", nodeCount), zap.Int("edges", edgeCount))
 	if len(stages) > 0 {
-		plan.Merge(idx.commitIncrementalStages(stages, markerBatch))
-		for _, stage := range stages {
-			receipts = append(receipts, fileReadReceipt{
-				absPath: stage.absPath, mtimeKey: stage.mtimeKey, readVersion: stage.readVersion,
-			})
+		committedPlan, err := idx.commitIncrementalStages(stages, markerBatch)
+		if err != nil {
+			for _, stage := range stages {
+				idx.noteFileIndexFailure(stage.absPath, err)
+				readFailed = append(readFailed, stage.absPath)
+			}
+		} else {
+			plan.Merge(committedPlan)
+			for _, stage := range stages {
+				receipts = append(receipts, fileReadReceipt{
+					absPath: stage.absPath, mtimeKey: stage.mtimeKey, readVersion: stage.readVersion,
+				})
+			}
 		}
 		// Commit no longer reads the staged source, result, or tree. Return
 		// their shared admission capacity before fallback work or receipt
@@ -486,7 +496,7 @@ func contractBridgeNodeIDsForNodes(g graph.Store, nodes []*graph.Node) []string 
 func (idx *Indexer) commitIncrementalStages(
 	stages []*incrementalBatchStage,
 	markerBatch *reparsePendingEnrichmentBatch,
-) DerivedInvalidationPlan {
+) (DerivedInvalidationPlan, error) {
 	timing := startReconcilePhase(idx.logger, idx.repoPrefix, "chunk_graph_apply",
 		zap.Int("staged_files", len(stages)))
 	defer timing.abort()
@@ -596,14 +606,16 @@ func (idx *Indexer) commitIncrementalStages(
 		contractBridgeNodeIDsFromPriorView(structural, view)...,
 	)
 
-	idx.replaceIncrementalContentBatch(stages)
-
 	if len(structural) > 0 {
-		idx.commitStructuralIncrementalBatch(structural, view, markerBatch)
+		if err := idx.commitStructuralIncrementalBatch(structural, view, markerBatch); err != nil {
+			timing.complete(err)
+			return DerivedInvalidationPlan{}, err
+		}
 	}
 	if len(metadata) > 0 {
 		idx.commitMetadataIncrementalBatch(metadata)
 	}
+	idx.replaceIncrementalContentBatch(stages)
 	idx.persistIncrementalSidecars(stages)
 	idx.updateIncrementalSearch(stages)
 	idx.upsertIncrementalFTS(stages)
@@ -626,7 +638,7 @@ func (idx *Indexer) commitIncrementalStages(
 		))
 	}
 	timing.complete(nil, zap.Int("structural_files", len(structural)), zap.Int("metadata_files", len(metadata)))
-	return plan
+	return plan, nil
 }
 
 func structuralPriorIDs(stages []*incrementalBatchStage) map[string]struct{} {
@@ -843,8 +855,9 @@ func (idx *Indexer) commitStructuralIncrementalBatch(
 	stages []*incrementalBatchStage,
 	view incrementalPriorView,
 	markerBatch *reparsePendingEnrichmentBatch,
-) {
+) error {
 	deferResolverCatchup := markerBatch != nil && markerBatch.deferResolverCatchup
+	replacer, atomicReplacement := idx.graph.(graph.FileBatchReplacer)
 	paths := make([]string, 0, len(stages))
 	oldFTSNodeIDs := make([]string, 0)
 	oldFuncIDs := make([]string, 0)
@@ -863,19 +876,49 @@ func (idx *Indexer) commitStructuralIncrementalBatch(
 			if node.Kind != graph.KindContract {
 				oldFTSNodeIDs = append(oldFTSNodeIDs, node.ID)
 			}
-			idx.removeFromSearch(node)
+			if !atomicReplacement {
+				idx.removeFromSearch(node)
+			}
 			if node.Kind == graph.KindFunction || node.Kind == graph.KindMethod {
 				oldFuncIDs = append(oldFuncIDs, node.ID)
 			}
 		}
 	}
 
-	restubIncomingRefsFromView(idx.graph, stages, view)
 	// Canonical FTS lifetime follows the backend's atomic owner decision.
 	// Retained contracts keep existing rows; actual orphans are deleted there.
-	idx.deleteSymbolFTS(oldFTSNodeIDs)
-	evictFilesBatched(idx.graph, paths)
-	idx.graph.AddBatch(nodes, edges)
+	if atomicReplacement {
+		// Incoming references are retired by file eviction. Publish parked
+		// copies in the same transaction; a failed replacement must leave
+		// both the old store and the captured prior view untouched.
+		edges = append(edges, incomingRestubsForReplacement(stages, view)...)
+		if err := replacer.ReplaceFiles(graph.FileBatchReplacement{
+			FilePaths: paths, Nodes: nodes, Edges: edges,
+			Symbols: idx.incrementalFTSItems(stages),
+		}); err != nil {
+			return fmt.Errorf("publish incremental file replacement: %w", err)
+		}
+		fresh := make(map[string]struct{}, len(nodes))
+		for _, node := range nodes {
+			if node != nil {
+				fresh[node.ID] = struct{}{}
+			}
+		}
+		for _, stage := range stages {
+			for _, node := range stage.priorNodes {
+				if node != nil {
+					if _, retained := fresh[node.ID]; !retained {
+						idx.removeFromSearch(node)
+					}
+				}
+			}
+		}
+	} else {
+		restubIncomingRefsFromView(idx.graph, stages, view)
+		idx.deleteSymbolFTS(oldFTSNodeIDs)
+		evictFilesBatched(idx.graph, paths)
+		idx.graph.AddBatch(nodes, edges)
+	}
 
 	if !deferResolverCatchup {
 		idx.observeIncrementalCatchup("resolve", paths)
@@ -927,6 +970,7 @@ func (idx *Indexer) commitStructuralIncrementalBatch(
 		markerBatch.mergeDeferredAffected(idx.planAffectedByStages(stages))
 	}
 	idx.enrichAndMarkIncrementalStages(stages, markerBatch)
+	return nil
 }
 
 func (idx *Indexer) commitMetadataIncrementalBatch(stages []*incrementalBatchStage) {
@@ -952,6 +996,32 @@ func (idx *Indexer) updateIncrementalSearch(stages []*incrementalBatchStage) {
 			idx.search.Add(node.ID, searchIndexFields(node, idx.projectName)...)
 		}
 	}
+}
+
+func incomingRestubsForReplacement(stages []*incrementalBatchStage, view incrementalPriorView) []*graph.Edge {
+	evicted := structuralPriorIDs(stages)
+	var parked []*graph.Edge
+	for _, stage := range stages {
+		for _, node := range stage.priorNodes {
+			if node == nil || node.Name == "" || !graph.IsReferenceableSymbol(node.Kind) {
+				continue
+			}
+			for _, edge := range view.inByNode[node.ID] {
+				if edge == nil || !graph.IsResolvableRefEdge(edge.Kind) || graph.IsUnresolvedTarget(edge.To) {
+					continue
+				}
+				if _, sourceEvicted := evicted[edge.From]; sourceEvicted {
+					continue
+				}
+				copy := *edge
+				copy.Meta = maps.Clone(edge.Meta)
+				graph.StashRestubProvenance(&copy)
+				copy.To = graph.UnresolvedMarker + node.Name
+				parked = append(parked, &copy)
+			}
+		}
+	}
+	return parked
 }
 
 func restubIncomingRefsFromView(
@@ -1024,6 +1094,14 @@ func (idx *Indexer) upsertIncrementalFTS(stages []*incrementalBatchStage) {
 	if !ok {
 		return
 	}
+	items := idx.incrementalFTSItems(stages)
+	if err := batcher.BatchUpsertSymbolFTS(items); err != nil {
+		idx.logger.Debug("indexer: backend FTS batch upsert failed",
+			zap.Int("symbols", len(items)), zap.Error(err))
+	}
+}
+
+func (idx *Indexer) incrementalFTSItems(stages []*incrementalBatchStage) []graph.SymbolFTSItem {
 	var items []graph.SymbolFTSItem
 	for _, stage := range stages {
 		for _, node := range stage.result.Nodes {
@@ -1035,10 +1113,7 @@ func (idx *Indexer) upsertIncrementalFTS(stages []*incrementalBatchStage) {
 			})
 		}
 	}
-	if err := batcher.BatchUpsertSymbolFTS(items); err != nil {
-		idx.logger.Debug("indexer: backend FTS batch upsert failed",
-			zap.Int("symbols", len(items)), zap.Error(err))
-	}
+	return items
 }
 
 func (idx *Indexer) replaceIncrementalContentBatch(stages []*incrementalBatchStage) {
