@@ -62,6 +62,10 @@ type GitTreeSource struct {
 	order   []string
 	entries map[string]*treeEntry
 
+	// Missing objects belong to this source generation's degraded snapshot.
+	// Reconstruct the source after fetching them to recover its capability.
+	missingOIDs map[string]struct{}
+
 	// mu serializes the batch protocol and the lazy symlink-target
 	// cache. The pipe carries one request and one response at a time,
 	// so this lock is also what makes concurrent Open and Stat safe.
@@ -96,6 +100,7 @@ func NewGitTreeSource(ctx context.Context, repoDir, treeOID string) (*GitTreeSou
 	}
 
 	listing, err := runGit(ctx, abs, "ls-tree", "-r", "-l", "-z", "--full-tree", resolved)
+	var missingOIDs map[string]struct{}
 	if err != nil {
 		missing, probeErr := gitTreeHasMissingObjects(ctx, abs, resolved, true)
 		switch {
@@ -103,15 +108,31 @@ func NewGitTreeSource(ctx context.Context, repoDir, treeOID string) (*GitTreeSou
 			return nil, fmt.Errorf("git tree source: list %s: %w (local missing-tree probe failed: %v)", resolved, err, probeErr)
 		case missing:
 			return nil, fmt.Errorf("git tree source: list %s: %w", resolved, ErrObjectMissing)
-		default:
+		}
+		missingOIDs, probeErr = gitTreeMissingObjects(ctx, abs, resolved, false)
+		if probeErr != nil {
+			return nil, fmt.Errorf("git tree source: list %s: %w (local missing-blob probe failed: %v)", resolved, err, probeErr)
+		}
+		if len(missingOIDs) == 0 {
 			return nil, fmt.Errorf("git tree source: list %s: %w", resolved, err)
+		}
+		// -l reads every blob's size. Older Git releases fail that lookup
+		// for promised objects, even when lazy fetching is disabled.
+		listing, err = runGit(ctx, abs, "ls-tree", "-r", "-z", "--full-tree", resolved)
+		if err != nil {
+			return nil, fmt.Errorf("git tree source: list %s without blob sizes: %w", resolved, err)
 		}
 	}
 	order, entries, err := parseTreeListing(listing)
 	if err != nil {
 		return nil, fmt.Errorf("git tree source: list %s: %w", resolved, err)
 	}
-	return &GitTreeSource{repoDir: abs, treeOID: resolved, order: order, entries: entries}, nil
+	if len(missingOIDs) != 0 {
+		if err := populateLocalBlobSizes(ctx, abs, order, entries, missingOIDs); err != nil {
+			return nil, fmt.Errorf("git tree source: local blob sizes for %s: %w", resolved, err)
+		}
+	}
+	return &GitTreeSource{repoDir: abs, treeOID: resolved, order: order, entries: entries, missingOIDs: missingOIDs}, nil
 }
 
 // VerifyGitTreeObjectsLocal proves that every tree and blob reachable from
@@ -168,16 +189,98 @@ func resolveGitTreeOID(ctx context.Context, repoDir, treeOID string) (string, st
 }
 
 func gitTreeHasMissingObjects(ctx context.Context, repoDir, treeOID string, treesOnly bool) (bool, error) {
-	args := []string{"rev-list", "--objects", "--missing=print", "--no-object-names"}
+	missing, err := gitTreeMissingObjects(ctx, repoDir, treeOID, treesOnly)
+	return len(missing) != 0, err
+}
+
+func gitTreeMissingObjects(ctx context.Context, repoDir, treeOID string, treesOnly bool) (map[string]struct{}, error) {
+	args := []string{"rev-list", "--objects", "--missing=print", "--ignore-missing", "--no-object-names"}
 	if treesOnly {
 		args = append(args, "--filter=blob:none")
 	}
 	args = append(args, treeOID)
 	out, err := runGit(ctx, repoDir, args...)
 	if err != nil {
-		return false, err
+		return nil, err
 	}
-	return parseMissingObjectList(out)
+	missing := make(map[string]struct{})
+	if len(bytes.TrimSpace(out)) == 0 {
+		// --missing=print covers descendants; --ignore-missing also
+		// lets us distinguish an absent starting object from Git errors.
+		missing[treeOID] = struct{}{}
+		return missing, nil
+	}
+	if _, err := parseMissingObjectList(out); err != nil {
+		return nil, err
+	}
+	for _, line := range bytes.Split(out, []byte{'\n'}) {
+		if len(line) > 0 && line[0] == '?' {
+			missing[string(line[1:])] = struct{}{}
+		}
+	}
+	return missing, nil
+}
+
+// populateLocalBlobSizes restores the size metadata after a size-free tree
+// listing. Only objects proven local by the tree walk enter the batch, so a
+// promised missing blob cannot terminate it or trigger a fetch.
+func populateLocalBlobSizes(ctx context.Context, repoDir string, order []string, entries map[string]*treeEntry, missing map[string]struct{}) error {
+	var input strings.Builder
+	requested := make(map[string]struct{})
+	for _, path := range order {
+		oid := entries[path].oid
+		if _, absent := missing[oid]; absent {
+			continue
+		}
+		if _, duplicate := requested[oid]; duplicate {
+			continue
+		}
+		requested[oid] = struct{}{}
+		input.WriteString(oid)
+		input.WriteByte('\n')
+	}
+	if len(requested) == 0 {
+		return nil
+	}
+	out, err := runGitWithInput(ctx, repoDir, strings.NewReader(input.String()), "cat-file", "--batch-check")
+	if err != nil {
+		return err
+	}
+	sizes := make(map[string]int64, len(requested))
+	for _, line := range bytes.Split(out, []byte{'\n'}) {
+		if len(line) == 0 {
+			continue
+		}
+		fields := strings.Fields(string(line))
+		if len(fields) < 2 {
+			return fmt.Errorf("git cat-file returned malformed metadata %q", line)
+		}
+		if _, wanted := requested[fields[0]]; !wanted {
+			return fmt.Errorf("git cat-file returned unrequested object %q", fields[0])
+		}
+		delete(requested, fields[0])
+		if len(fields) == 2 && fields[1] == "missing" {
+			missing[fields[0]] = struct{}{}
+			continue
+		}
+		if len(fields) != 3 || fields[1] != "blob" {
+			return fmt.Errorf("git cat-file returned unexpected blob metadata %q", line)
+		}
+		size, err := strconv.ParseInt(fields[2], 10, 64)
+		if err != nil || size < 0 {
+			return fmt.Errorf("git cat-file returned invalid blob size %q", line)
+		}
+		sizes[fields[0]] = size
+	}
+	if len(requested) != 0 {
+		return errors.New("git cat-file omitted requested blob metadata")
+	}
+	for _, entry := range entries {
+		if size, ok := sizes[entry.oid]; ok {
+			entry.meta.Size = size
+		}
+	}
+	return nil
 }
 
 func parseMissingObjectList(out []byte) (bool, error) {
@@ -384,6 +487,9 @@ func (s *GitTreeSource) readBlobLocked(oid string) ([]byte, error) {
 	if s.closed {
 		return nil, errors.New("git tree source: closed")
 	}
+	if _, missing := s.missingOIDs[oid]; missing {
+		return nil, fmt.Errorf("git object %s: %w", oid, ErrObjectMissing)
+	}
 	if s.batch == nil {
 		b, err := startGitBatch(context.Background(), s.repoDir)
 		if err != nil {
@@ -392,7 +498,24 @@ func (s *GitTreeSource) readBlobLocked(oid string) ([]byte, error) {
 		s.batch = b
 		s.spawns++
 	}
-	return s.batch.read(oid)
+	data, err := s.batch.read(oid)
+	if err == nil || s.batch.broken == nil {
+		return data, err
+	}
+	// A promised object can disappear after enumeration. Some Git releases
+	// then terminate the batch instead of replying "missing". Confirm local
+	// absence without interpreting stderr or scanning unrelated objects.
+	out, probeErr := runGit(context.Background(), s.repoDir, "rev-parse", "--disambiguate="+oid)
+	if probeErr == nil && len(bytes.TrimSpace(out)) == 0 {
+		s.batch.close()
+		s.batch = nil
+		if s.missingOIDs == nil {
+			s.missingOIDs = make(map[string]struct{})
+		}
+		s.missingOIDs[oid] = struct{}{}
+		return nil, fmt.Errorf("git object %s: %w: %w", oid, ErrObjectMissing, err)
+	}
+	return nil, err
 }
 
 // spawnCount reports how many batch children this source has started.

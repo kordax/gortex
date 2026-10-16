@@ -86,8 +86,13 @@ func isFixedGitEnvKey(key string) bool {
 // git concurrency limiter but offers no way to set the child's
 // environment, and every git child here must carry gitEnv.
 func runGit(ctx context.Context, dir string, args ...string) ([]byte, error) {
+	return runGitWithInput(ctx, dir, nil, args...)
+}
+
+func runGitWithInput(ctx context.Context, dir string, input io.Reader, args ...string) ([]byte, error) {
 	full := append([]string{"-C", dir}, args...)
 	cmd := exec.CommandContext(ctx, "git", full...)
+	cmd.Stdin = input
 	cmd.Env = gitEnv()
 	platform.ConfigureBackgroundCommand(cmd)
 	var stdout, stderr bytes.Buffer

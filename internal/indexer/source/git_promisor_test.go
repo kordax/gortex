@@ -4,9 +4,14 @@ import (
 	"context"
 	"errors"
 	"io"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/zzet/gortex/internal/testutil/gitpromisor"
 )
@@ -121,6 +126,101 @@ func TestGitTreeSourcePromisorObjectsNeverFetch(t *testing.T) {
 			t.Fatalf("ReadAll() = %q, %v", got, err)
 		}
 	})
+}
+
+func TestGitTreeSourcePromisorMissingBlobPreservesAvailableMetadataAndReads(t *testing.T) {
+	fixture := gitpromisor.New(t)
+	client := fixture.Clone(t, "blob:none")
+	client.FetchAndRequireRequest(t, fixture.RootBlobOID)
+	client.ResetRequests(t)
+
+	src, err := NewGitTreeSource(t.Context(), client.Dir, fixture.RootTreeOID)
+	require.NoError(t, err)
+	t.Cleanup(func() { assert.NoError(t, src.Close()) })
+
+	rootMeta, err := src.Stat("root.go")
+	require.NoError(t, err)
+	assert.Equal(t, int64(len("package root\n")), rootMeta.Size)
+	missingMeta, err := src.Stat("nested/missing.go")
+	require.NoError(t, err)
+	assert.Equal(t, int64(-1), missingMeta.Size)
+	assert.Zero(t, src.spawnCount())
+
+	for range 2 {
+		_, _, err := src.Open("nested/missing.go")
+		assert.ErrorIs(t, err, ErrObjectMissing)
+	}
+	assert.Zero(t, src.spawnCount(), "known missing objects must not start content children")
+
+	reader, meta, err := src.Open("root.go")
+	require.NoError(t, err)
+	content, err := io.ReadAll(reader)
+	require.NoError(t, err)
+	assert.NoError(t, reader.Close())
+	assert.Equal(t, "package root\n", string(content))
+	assert.Equal(t, rootMeta, meta)
+	assert.Equal(t, 1, src.spawnCount())
+
+	_, _, err = src.Open("nested/missing.go")
+	assert.ErrorIs(t, err, ErrObjectMissing)
+	assert.Equal(t, 1, src.spawnCount())
+	assert.Zero(t, client.RequestCount(t))
+}
+
+func TestGitTreeSourcePromisorBlobLossDoesNotPoisonAvailableReads(t *testing.T) {
+	fixture := gitpromisor.New(t)
+	client := fixture.Clone(t, "blob:none")
+	client.FetchAndRequireRequest(t, fixture.RootBlobOID)
+	client.FetchAndRequireRequest(t, fixture.NestedBlobOID)
+	client.ResetRequests(t)
+
+	src, err := NewGitTreeSource(t.Context(), client.Dir, fixture.RootTreeOID)
+	require.NoError(t, err)
+	t.Cleanup(func() { assert.NoError(t, src.Close()) })
+
+	// Each explicit blob fetch has its own pack. Remove only the pack that
+	// supplied the nested blob, leaving the source's complete enumeration
+	// and the independent root blob intact.
+	indexes, err := filepath.Glob(filepath.Join(client.Dir, ".git", "objects", "pack", "*.idx"))
+	require.NoError(t, err)
+	removed := false
+	for _, index := range indexes {
+		out, err := runGit(t.Context(), client.Dir, "verify-pack", "-v", index)
+		require.NoError(t, err)
+		if !strings.Contains("\n"+string(out), "\n"+fixture.NestedBlobOID+" ") {
+			continue
+		}
+		base := strings.TrimSuffix(index, ".idx")
+		for _, suffix := range []string{".idx", ".pack", ".promisor", ".rev", ".bitmap"} {
+			if err := os.Remove(base + suffix); !errors.Is(err, os.ErrNotExist) {
+				require.NoError(t, err)
+			}
+		}
+		removed = true
+		break
+	}
+	require.True(t, removed, "materialized blob must have its own pack")
+	require.False(t, client.ObjectPresent(t, fixture.NestedBlobOID))
+	require.True(t, client.ObjectPresent(t, fixture.RootBlobOID))
+
+	_, _, err = src.Open("nested/missing.go")
+	assert.ErrorIs(t, err, ErrObjectMissing)
+	reader, meta, err := src.Open("root.go")
+	require.NoError(t, err)
+	content, err := io.ReadAll(reader)
+	require.NoError(t, err)
+	assert.NoError(t, reader.Close())
+	assert.Equal(t, "package root\n", string(content))
+	assert.Equal(t, int64(len(content)), meta.Size)
+
+	// Git versions that exit on a disabled lazy fetch need one replacement
+	// child. Versions that reply "missing" can keep the original child.
+	spawns := src.spawnCount()
+	assert.LessOrEqual(t, spawns, 2)
+	_, _, err = src.Open("nested/missing.go")
+	assert.ErrorIs(t, err, ErrObjectMissing)
+	assert.Equal(t, spawns, src.spawnCount())
+	assert.Zero(t, client.RequestCount(t))
 }
 
 func TestGitTreeSourceDoesNotNormalizeUnrelatedGitFailure(t *testing.T) {

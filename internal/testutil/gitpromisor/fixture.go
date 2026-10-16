@@ -146,18 +146,22 @@ func (c *Client) WriteRef(t testing.TB, ref, oid string) {
 // ObjectPresent reports whether oid is available without allowing a lazy fetch.
 func (c *Client) ObjectPresent(t testing.TB, oid string) bool {
 	t.Helper()
-	cmd := exec.Command("git", "-C", c.Dir, "cat-file", "-e", oid)
+	// Looking up a promised object can fail with exit 128 even when lazy
+	// fetching is disabled. Enumerate the local inventory instead.
+	cmd := exec.Command("git", "-C", c.Dir, "cat-file", "--batch-all-objects", "--batch-check=%(objectname)")
 	cmd.Env = commandEnv(true)
-	var stderr bytes.Buffer
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
-		var exitErr *exec.ExitError
-		if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 {
-			return false
-		}
 		t.Fatalf("probe local object %s: %v: %s", oid, err, strings.TrimSpace(stderr.String()))
 	}
-	return true
+	for _, localOID := range strings.Fields(stdout.String()) {
+		if localOID == oid {
+			return true
+		}
+	}
+	return false
 }
 
 // FetchAndRequireRequest materializes oid with lazy fetching enabled and proves

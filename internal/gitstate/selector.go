@@ -163,13 +163,29 @@ func peelToCommit(ctx context.Context, dir, oid string) (string, error) {
 // than a malformed selector.
 func treeOfCommit(ctx context.Context, dir, commit string) (string, error) {
 	tree, err := revParseOID(ctx, dir, commit+"^{tree}")
-	if err != nil {
-		if localGitExitCode(err) == 1 {
-			return "", fmt.Errorf("tree of %s: %w", commit, ErrRefNotAvailableLocally)
-		}
-		return "", fmt.Errorf("resolve tree of %s: %w", commit, err)
+	if err == nil {
+		return tree, nil
 	}
-	return tree, nil
+	if localGitExitCode(err) == 1 {
+		return "", fmt.Errorf("tree of %s: %w", commit, ErrRefNotAvailableLocally)
+	}
+	if localGitExitCode(err) == 128 {
+		// Some Git releases terminate a disabled lazy fetch with exit 128.
+		// Read the available commit itself, without peeling its missing tree.
+		if raw, readErr := runLocalGit(ctx, dir, "cat-file", "commit", commit); readErr == nil {
+			header, _, _ := strings.Cut(string(raw), "\n")
+			fields := strings.Fields(header)
+			if len(fields) == 2 && fields[0] == "tree" && isOID(fields[1]) && !isZeroOID(fields[1]) {
+				if missing, probeErr := localObjectUnavailable(ctx, dir, fields[1]); probeErr == nil && missing {
+					return "", fmt.Errorf("tree of %s: %w", commit, ErrRefNotAvailableLocally)
+				}
+			}
+		}
+	}
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return "", fmt.Errorf("resolve tree of %s: %w", commit, ctxErr)
+	}
+	return "", fmt.Errorf("resolve tree of %s: %w", commit, err)
 }
 
 // revParseOID resolves a revision expression built from an already-validated
@@ -197,14 +213,20 @@ func objectType(ctx context.Context, dir, oid string) (string, error) {
 }
 
 func localObjectUnavailable(ctx context.Context, dir, oid string) (bool, error) {
-	_, err := runLocalGit(ctx, dir, "cat-file", "-e", oid)
-	if err == nil {
-		return false, nil
+	// A full-length disambiguation checks local object names without trying
+	// a promisor remote or traversing the object's descendants.
+	out, err := runLocalGit(ctx, dir, "rev-parse", "--disambiguate="+oid)
+	if err != nil {
+		return false, err
 	}
-	if localGitExitCode(err) == 1 {
+	resolved := strings.TrimSpace(string(out))
+	if resolved == "" {
 		return true, nil
 	}
-	return false, err
+	if !strings.EqualFold(resolved, oid) {
+		return false, fmt.Errorf("git rev-parse returned %q for local object %s", resolved, oid)
+	}
+	return false, nil
 }
 
 // firstField returns the first whitespace-delimited field of git's output.
