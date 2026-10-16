@@ -10,12 +10,8 @@ import (
 func resetSharedCode(t *testing.T) {
 	t.Helper()
 	restore := func() {
-		sharedCodeMu.Lock()
-		sharedCodeInst = nil
-		sharedCodeLoaded = false
-		sharedCodeEnable = true
-		sharedCodeReaper = false
-		sharedCodeMu.Unlock()
+		sharedCode.setEnabled(false)
+		sharedCode.setEnabled(true)
 	}
 	restore()
 	t.Cleanup(restore)
@@ -34,9 +30,9 @@ func TestSetCodeEmbedderEnabledGatesAndDrops(t *testing.T) {
 	}
 	SetCodeEmbedderEnabled(false)
 
-	sharedCodeMu.Lock()
-	inst, loaded := sharedCodeInst, sharedCodeLoaded
-	sharedCodeMu.Unlock()
+	sharedCode.mu.Lock()
+	inst, loaded := sharedCode.provider, sharedCode.loaded
+	sharedCode.mu.Unlock()
 	if inst != nil || loaded {
 		t.Error("disabling the channel left the model resident")
 	}
@@ -60,21 +56,23 @@ func TestCodeEmbedderReaperDropsIdleModel(t *testing.T) {
 		t.Skip("no embedder available in this build")
 	}
 
-	sharedCodeMu.Lock()
-	sharedCodeLoaded = true
+	sharedCode.mu.Lock()
 	// Backdate the last use past the TTL, the state the reaper wakes to.
-	sharedCodeUsedAt = time.Now().Add(-2 * codeEmbedderIdleTTL)
-	idle := sharedCodeLoaded && time.Since(sharedCodeUsedAt) >= codeEmbedderIdleTTL
-	sharedCodeMu.Unlock()
+	sharedCode.usedAt = time.Now().Add(-2 * codeEmbedderIdleTTL)
+	sharedCode.mu.Unlock()
+	sharedCode.reap()
+	sharedCode.mu.Lock()
+	idle := !sharedCode.loaded && sharedCode.provider == nil
+	sharedCode.mu.Unlock()
 	if !idle {
 		t.Fatal("the reaper's idle predicate did not fire on a backdated model")
 	}
 
 	// A use refreshes the stamp, so an active daemon never reloads.
 	SharedCodeEmbedder()
-	sharedCodeMu.Lock()
-	stillIdle := time.Since(sharedCodeUsedAt) >= codeEmbedderIdleTTL
-	sharedCodeMu.Unlock()
+	sharedCode.mu.Lock()
+	stillIdle := time.Since(sharedCode.usedAt) >= codeEmbedderIdleTTL
+	sharedCode.mu.Unlock()
 	if stillIdle {
 		t.Error("using the embedder did not refresh its idle stamp")
 	}

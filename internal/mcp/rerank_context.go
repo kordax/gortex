@@ -97,7 +97,7 @@ func (s *Server) buildRerankContext(ctx context.Context, query string) *rerank.C
 	// BM25 alone cannot bridge "decode bson body" to BindBody. An empty
 	// query vector leaves the signal at 0, so a pure-identifier query
 	// is unaffected even before the class damping.
-	if emb := embedding.SharedCodeEmbedder(); emb != nil {
+	if emb := embedding.SharedCodeEmbedderContext(ctx); emb != nil {
 		rctx.EmbedText = embedding.EmbedTextFunc(emb)
 		if qv, err := emb.Embed(ctx, query); err == nil {
 			rctx.QueryVec = qv

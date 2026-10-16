@@ -60,14 +60,25 @@ func EmbedTextFunc(p Provider) func(string) []float32 {
 // life: the loader records when it was last used and a reaper drops it
 // after an idle period, so the next search pays a reload instead of the
 // process paying rent forever.
-var (
-	sharedCodeMu     sync.Mutex
-	sharedCodeInst   Provider
-	sharedCodeLoaded bool
-	sharedCodeUsedAt time.Time
-	sharedCodeEnable = true
-	sharedCodeReaper bool
-)
+var sharedCode = codeEmbedderCache{enabled: true}
+
+// A flight belongs to its waiters collectively. Canceling one request must
+// not interrupt another request still waiting for the same cold load.
+type codeEmbedderFlight struct {
+	done    chan struct{}
+	cancel  context.CancelFunc
+	waiters int
+}
+
+type codeEmbedderCache struct {
+	mu       sync.Mutex
+	enabled  bool
+	loaded   bool
+	provider Provider
+	flight   *codeEmbedderFlight
+	usedAt   time.Time
+	reaper   *time.Timer
+}
 
 // codeEmbedderIdleTTL is how long the code embedder survives with no
 // rerank traffic. Long enough that a working session never reloads,
@@ -79,12 +90,23 @@ const codeEmbedderIdleTTL = 30 * time.Minute
 // The daemon calls this from its resolved configuration; the channel is on
 // by default, which is the historical behaviour.
 func SetCodeEmbedderEnabled(enabled bool) {
-	sharedCodeMu.Lock()
-	defer sharedCodeMu.Unlock()
-	sharedCodeEnable = enabled
+	sharedCode.setEnabled(enabled)
+}
+
+func (c *codeEmbedderCache) setEnabled(enabled bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.enabled = enabled
 	if !enabled {
-		sharedCodeInst = nil
-		sharedCodeLoaded = false
+		c.provider = nil
+		c.loaded = false
+		if c.flight != nil {
+			c.flight.cancel()
+		}
+		if c.reaper != nil {
+			c.reaper.Stop()
+			c.reaper = nil
+		}
 	}
 }
 
@@ -95,29 +117,88 @@ func SetCodeEmbedderEnabled(enabled bool) {
 // load, or when the channel is disabled. Safe for concurrent use.
 // GORTEX_POTION=0 pins the GloVe fallback (diagnostic escape hatch).
 func SharedCodeEmbedder() Provider {
-	sharedCodeMu.Lock()
-	defer sharedCodeMu.Unlock()
-	if !sharedCodeEnable {
-		return nil
-	}
-	sharedCodeUsedAt = time.Now()
-	if !sharedCodeLoaded {
-		sharedCodeInst = buildCodeEmbedder()
-		sharedCodeLoaded = true
-		startCodeEmbedderReaperLocked()
-	}
-	return sharedCodeInst
+	return SharedCodeEmbedderContext(context.Background())
 }
 
-func buildCodeEmbedder() Provider {
+// SharedCodeEmbedderContext waits for the shared cold load until ctx ends.
+// The last departing waiter cancels an unfinished download. Loading never
+// holds the cache mutex, so configuration changes remain responsive.
+func SharedCodeEmbedderContext(ctx context.Context) Provider {
+	return sharedCode.get(ctx, buildCodeEmbedderContext)
+}
+
+func (c *codeEmbedderCache) get(ctx context.Context, load func(context.Context) Provider) Provider {
+	for ctx.Err() == nil {
+		c.mu.Lock()
+		if !c.enabled {
+			c.mu.Unlock()
+			return nil
+		}
+		c.usedAt = time.Now()
+		if c.loaded {
+			p := c.provider
+			c.mu.Unlock()
+			return p
+		}
+		f := c.flight
+		if f == nil {
+			loadCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
+			f = &codeEmbedderFlight{done: make(chan struct{}), cancel: cancel}
+			c.flight = f
+			go c.load(loadCtx, f, load)
+		}
+		f.waiters++
+		c.mu.Unlock()
+
+		select {
+		case <-ctx.Done():
+			c.mu.Lock()
+			f.waiters--
+			if f.waiters == 0 {
+				f.cancel()
+			}
+			c.mu.Unlock()
+			return nil
+		case <-f.done:
+			// A disabled or canceled flight is not cached. Retry only if
+			// this request is still live and the channel remains enabled.
+		}
+	}
+	return nil
+}
+
+func (c *codeEmbedderCache) load(ctx context.Context, f *codeEmbedderFlight, load func(context.Context) Provider) {
+	defer f.cancel()
+	p := load(ctx)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if ctx.Err() == nil && c.enabled {
+		c.provider = p
+		c.loaded = true
+		c.usedAt = time.Now()
+		if c.reaper == nil {
+			c.reaper = time.AfterFunc(codeEmbedderIdleTTL, c.reap)
+		}
+	}
+	c.flight = nil
+	close(f.done)
+}
+
+func buildCodeEmbedderContext(ctx context.Context) Provider {
+	if ctx.Err() != nil {
+		return nil
+	}
 	if v := strings.TrimSpace(os.Getenv("GORTEX_POTION")); v == "0" || strings.EqualFold(v, "false") || strings.EqualFold(v, "off") {
 		return staticOrNil()
 	}
 	dir := resolvePotionDir()
 	if dir == "" {
-		if d, err := downloadPotion(); err == nil {
+		if d, err := downloadPotionContext(ctx); err == nil {
 			dir = d
 		}
+	}
+	if ctx.Err() != nil {
+		return nil
 	}
 	if dir != "" {
 		if p, err := NewPotionProviderFromDir(dir); err == nil {
@@ -127,34 +208,27 @@ func buildCodeEmbedder() Provider {
 	return staticOrNil()
 }
 
-// startCodeEmbedderReaperLocked launches the idle reaper once. It drops
-// the instance and exits; a later load starts a fresh one. The caller must
-// hold sharedCodeMu.
-func startCodeEmbedderReaperLocked() {
-	if sharedCodeReaper {
+// reap retains no periodic goroutine while the channel is disabled.
+func (c *codeEmbedderCache) reap() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if !c.loaded {
+		c.reaper = nil
 		return
 	}
-	sharedCodeReaper = true
-	go func() {
-		ticker := time.NewTicker(codeEmbedderIdleTTL / 4)
-		defer ticker.Stop()
-		for range ticker.C {
-			sharedCodeMu.Lock()
-			idle := sharedCodeLoaded && time.Since(sharedCodeUsedAt) >= codeEmbedderIdleTTL
-			if idle {
-				if c, ok := sharedCodeInst.(interface{ Close() error }); ok {
-					_ = c.Close()
-				}
-				sharedCodeInst = nil
-				sharedCodeLoaded = false
-				sharedCodeReaper = false
-			}
-			sharedCodeMu.Unlock()
-			if idle {
-				return
-			}
-		}
-	}()
+	if remaining := codeEmbedderIdleTTL - time.Since(c.usedAt); remaining > 0 {
+		c.reaper.Reset(remaining)
+		return
+	}
+	if closer, ok := c.provider.(interface{ Close() error }); ok {
+		_ = closer.Close()
+	}
+	c.provider = nil
+	c.loaded = false
+	if c.reaper != nil {
+		c.reaper.Stop()
+	}
+	c.reaper = nil
 }
 
 // staticOrNil adapts SharedStatic's concrete return into the Provider

@@ -249,7 +249,10 @@ func hasPotionFiles(dir string) bool {
 // models dir, verifying each file's SHA-256 before moving it into
 // place. Returns the directory on success. Disabled entirely when
 // GORTEX_POTION_DOWNLOAD=0 (offline installs ship the sidecar instead).
-func downloadPotion() (string, error) {
+func downloadPotionContext(ctx context.Context) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
 	if v := strings.TrimSpace(os.Getenv("GORTEX_POTION_DOWNLOAD")); v == "0" || strings.EqualFold(v, "false") || strings.EqualFold(v, "off") {
 		return "", fmt.Errorf("model download disabled by GORTEX_POTION_DOWNLOAD")
 	}
@@ -275,17 +278,21 @@ func downloadPotion() (string, error) {
 				continue
 			}
 		}
-		if err := downloadVerified(client, potionBaseURL+"/"+f.name, dst, f.sum); err != nil {
+		if err := downloadVerifiedContext(ctx, client, potionBaseURL+"/"+f.name, dst, f.sum); err != nil {
 			return "", fmt.Errorf("fetch %s: %w", f.name, err)
 		}
 	}
 	return dir, nil
 }
 
-// downloadVerified streams url into dst.partial, verifies the SHA-256,
-// and renames into place atomically.
-func downloadVerified(client *http.Client, url, dst, wantSHA string) error {
-	resp, err := client.Get(url)
+// downloadVerified streams url into a unique temporary file, verifies the
+// SHA-256, and renames into place atomically.
+func downloadVerifiedContext(ctx context.Context, client *http.Client, url, dst, wantSHA string) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return err
+	}
+	resp, err := client.Do(req)
 	if err != nil {
 		return err
 	}
@@ -293,11 +300,12 @@ func downloadVerified(client *http.Client, url, dst, wantSHA string) error {
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("HTTP %d", resp.StatusCode)
 	}
-	tmp := dst + ".partial"
-	out, err := os.Create(tmp)
+	out, err := os.CreateTemp(filepath.Dir(dst), filepath.Base(dst)+".partial-*")
 	if err != nil {
 		return err
 	}
+	tmp := out.Name()
+	defer os.Remove(tmp)
 	h := sha256.New()
 	_, cpErr := io.Copy(io.MultiWriter(out, h), resp.Body)
 	closeErr := out.Close()
@@ -312,6 +320,9 @@ func downloadVerified(client *http.Client, url, dst, wantSHA string) error {
 	if got := hex.EncodeToString(h.Sum(nil)); got != wantSHA {
 		os.Remove(tmp)
 		return fmt.Errorf("checksum mismatch: got %s want %s", got, wantSHA)
+	}
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 	return os.Rename(tmp, dst)
 }
