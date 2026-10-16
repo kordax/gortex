@@ -7,6 +7,7 @@ import (
 	"io"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -30,15 +31,15 @@ func TestUpgradeInstallMethodDetection(t *testing.T) {
 		want    InstallMethod
 		wantCmd string
 	}{
-		{"brew_cellar", "/opt/homebrew/Cellar/gortex/0.48.0/bin/gortex", InstallBrew, "brew upgrade gortex"},
-		{"brew_intel", "/usr/local/Cellar/gortex/0.48.0/bin/gortex", InstallBrew, "brew upgrade gortex"},
-		{"scoop_windows", `C:\Users\x\scoop\apps\gortex\current\gortex.exe`, InstallScoop, "scoop update gortex"},
-		{"go_install", "/Users/x/go/bin/gortex", InstallGoInstall, "go install github.com/zzet/gortex/cmd/gortex@latest"},
-		{"installer_script", "/Users/x/.local/bin/gortex", InstallScript, "curl -fsSL https://get.gortex.dev | sh"},
-		{"installer_ps1", `C:\Users\x\AppData\Local\Programs\gortex\gortex.exe`, InstallScriptPS, "irm https://get.gortex.dev/install.ps1 | iex"},
+		{"brew_cellar", "/opt/homebrew/Cellar/gortex/0.48.0/bin/gortex", InstallBrew, ""},
+		{"brew_intel", "/usr/local/Cellar/gortex/0.48.0/bin/gortex", InstallBrew, ""},
+		{"scoop_windows", `C:\Users\x\scoop\apps\gortex\current\gortex.exe`, InstallScoop, ""},
+		{"go_install", "/Users/x/go/bin/gortex", InstallGoInstall, ""},
+		{"installer_script", "/Users/x/.local/bin/gortex", InstallScript, ""},
+		{"installer_ps1", `C:\Users\x\AppData\Local\Programs\gortex\gortex.exe`, InstallScriptPS, ""},
 		// os.Executable and %LOCALAPPDATA% can disagree on casing; Windows
 		// paths are case-insensitive, so the anchor must be too (issue #872).
-		{"installer_ps1_case", `c:\users\x\appdata\local\programs\Gortex\gortex.exe`, InstallScriptPS, "irm https://get.gortex.dev/install.ps1 | iex"},
+		{"installer_ps1_case", `c:\users\x\appdata\local\programs\Gortex\gortex.exe`, InstallScriptPS, ""},
 		{"localappdata_other_program", `C:\Users\x\AppData\Local\Programs\gortex-tools\gortex.exe`, InstallUnknown, ""},
 		{"unknown_system", "/usr/bin/gortex", InstallUnknown, ""},
 	}
@@ -58,18 +59,18 @@ func TestUpgradeInstallMethodDetection(t *testing.T) {
 		})
 	}
 
-	// A version pin flows into the go-install target.
-	if cmd, _ := upgradeInstructions(InstallGoInstall, "v0.49.0"); cmd != "go install github.com/zzet/gortex/cmd/gortex@v0.49.0" {
-		t.Errorf("pinned go install cmd = %q", cmd)
+	for _, method := range []InstallMethod{InstallBrew, InstallScoop, InstallGoInstall, InstallScriptPS, InstallUnknown} {
+		command, manual := upgradeInstructions(method, "v1.0.0")
+		assert.Empty(t, command)
+		assert.True(t, manual)
 	}
-	// …and into the PowerShell installer through GORTEX_VERSION, normalised to
-	// the tag form install.ps1 downloads.
-	if cmd, _ := upgradeInstructions(InstallScriptPS, "0.49.0"); cmd != "$env:GORTEX_VERSION='v0.49.0'; irm https://get.gortex.dev/install.ps1 | iex" {
-		t.Errorf("pinned install.ps1 cmd = %q", cmd)
-	}
-	if cmd, _ := upgradeInstructions(InstallScriptPS, "latest"); cmd != installPSScript {
-		t.Errorf("latest install.ps1 cmd = %q", cmd)
-	}
+	command, manual := upgradeInstructions(InstallScript, "1.0.0")
+	assert.False(t, manual)
+	assert.Contains(t, command, "https://raw.githubusercontent.com/kordax/gortex/refs/tags/v1.0.0/scripts/install.sh")
+	assert.Contains(t, command, `--output "$installer"`)
+	assert.Contains(t, command, `&& GORTEX_VERSION='v1.0.0' bash "$installer"`)
+	assert.NotContains(t, command, "zzet")
+	assert.NotContains(t, command, "get.gortex.dev")
 
 	// Without LOCALAPPDATA (any non-Windows host) the anchor never matches.
 	if got := detectInstallMethod(`C:\Users\x\AppData\Local\Programs\gortex\gortex.exe`, goBin, home, ""); got != InstallUnknown {
@@ -87,7 +88,7 @@ func TestValidateUpgradePin(t *testing.T) {
 	assert.Error(t, validateUpgradePin(InstallScriptPS, "v1'; Remove-Item C:\\x; '"))
 	assert.NoError(t, validateUpgradePin(InstallScriptPS, "latest"))
 	assert.Error(t, validateUpgradePin(InstallScriptPS, "main"))
-	assert.NoError(t, validateUpgradePin(InstallGoInstall, "main"))
+	assert.Error(t, validateUpgradePin(InstallGoInstall, "main"))
 }
 
 // TestUpgradeRunCommandUsesShellOnlyForPipelines proves --run routes the
@@ -95,32 +96,25 @@ func TestValidateUpgradePin(t *testing.T) {
 // than split into raw curl args — issue #281) while plain-argv methods still
 // exec directly with no shell in the way.
 func TestUpgradeRunCommandUsesShellOnlyForPipelines(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("fork automatic installation uses POSIX Bash; Windows updates are manual")
+	}
 	ctx := context.Background()
-	cmd := upgradeExecCommand(ctx, InstallScript, "curl -fsSL https://get.gortex.dev | sh")
+	command, manual := upgradeInstructions(InstallScript, "v1.0.0")
+	require.False(t, manual)
+	cmd := upgradeExecCommand(ctx, InstallScript, command)
 	// Assert on Args[0], not Path: exec.Command resolves a bare name through
 	// LookPath, so Path becomes /bin/sh once sh is on $PATH — Args[0] stays "sh".
-	if got := cmd.Args[0]; got != "sh" {
+	if got := cmd.Args[0]; got != "bash" {
 		t.Fatalf("script installer should run through sh, got %q args %v", got, cmd.Args)
 	}
-	if len(cmd.Args) != 3 || cmd.Args[1] != "-c" || cmd.Args[2] != "curl -fsSL https://get.gortex.dev | sh" {
+	if len(cmd.Args) != 5 || cmd.Args[1] != "-o" || cmd.Args[2] != "pipefail" || cmd.Args[3] != "-c" || cmd.Args[4] != command {
 		t.Fatalf("script installer command args = %#v", cmd.Args)
 	}
 
-	cmd = upgradeExecCommand(ctx, InstallGoInstall, "go install github.com/zzet/gortex/cmd/gortex@latest")
-	if got := cmd.Args[0]; got != "go" {
-		t.Fatalf("plain argv command should exec directly, got %q args %v", got, cmd.Args)
-	}
-	if len(cmd.Args) != 3 || cmd.Args[1] != "install" || cmd.Args[2] != "github.com/zzet/gortex/cmd/gortex@latest" {
-		t.Fatalf("go install command args = %#v", cmd.Args)
-	}
-
-	// The PowerShell installer is a PowerShell pipeline: it must reach
-	// powershell.exe as one -Command argument, never sh (absent on Windows).
-	cmd = upgradeExecCommand(ctx, InstallScriptPS, installPSScript)
-	want := []string{"powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", installPSScript}
-	if !assert.ObjectsAreEqual(want, cmd.Args) {
-		t.Fatalf("install.ps1 command args = %#v, want %#v", cmd.Args, want)
-	}
+	// A failed download must not be hidden by a successful bash on empty stdin.
+	cmd = upgradeExecCommand(ctx, InstallScript, "false | true")
+	require.Error(t, cmd.Run())
 }
 
 // TestRunUpgradeCommandDaemonBounce proves --run bounces the daemon around the
@@ -182,10 +176,10 @@ func TestRunUpgradeCommandDaemonBounce(t *testing.T) {
 // TestUpgradeReleaseTagParse covers the /releases/latest redirect tag parse.
 func TestUpgradeReleaseTagParse(t *testing.T) {
 	cases := map[string]string{
-		"https://github.com/zzet/gortex/releases/tag/v0.49.0":     "v0.49.0",
-		"https://github.com/zzet/gortex/releases/tag/v1.0.0-rc1":  "v1.0.0-rc1",
-		"https://github.com/zzet/gortex/releases/tag/v0.49.0?x=1": "v0.49.0",
-		"https://github.com/zzet/gortex/releases":                 "",
+		"https://github.com/kordax/gortex/releases/tag/v0.49.0":     "v0.49.0",
+		"https://github.com/kordax/gortex/releases/tag/v1.0.0-rc1":  "v1.0.0-rc1",
+		"https://github.com/kordax/gortex/releases/tag/v0.49.0?x=1": "v0.49.0",
+		"https://github.com/kordax/gortex/releases":                 "",
 		"": "",
 	}
 	for loc, want := range cases {

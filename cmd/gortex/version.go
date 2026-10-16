@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"runtime/debug"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -51,7 +52,8 @@ func runVersion(cmd *cobra.Command, _ []string) {
 	}
 
 	w := cmd.OutOrStdout()
-	fmt.Fprintf(w, "gortex %s\n", canonical(v))
+	fmt.Fprintf(w, "gortex %s (fork by kordax)\n", canonical(v))
+	fmt.Fprintf(w, "  source:  %s\n", upgradeRepoURL)
 	if v.IsZero() && v.Build == "" {
 		fmt.Fprintln(w, "  (dev build — no ldflags injected; build via `make build` or `goreleaser` for a versioned binary)")
 	}
@@ -76,8 +78,43 @@ func canonical(v semver.Version) string {
 // the version logic stays testable — tests that want to rewrite these
 // for a fake build can shadow them without having to reach into main.
 func versionFromMain() string { return version }
-func commitFromMain() string  { return commit }
-func dateFromMain() string    { return date }
+func commitFromMain() string {
+	info, ok := debug.ReadBuildInfo()
+	var vcsCommit string
+	if ok {
+		vcsCommit = vcsBuildCommit(info.Settings)
+	}
+	if commit != "" {
+		if (vcsCommit == "dirty" || strings.HasSuffix(vcsCommit, ".dirty")) && !strings.HasSuffix(commit, ".dirty") {
+			return commit + ".dirty"
+		}
+		return commit
+	}
+	return vcsCommit
+}
+
+// vcsBuildCommit preserves Go's source identity for plain go build as well as
+// release builds. A dirty checkout must never look like a clean release.
+func vcsBuildCommit(settings []debug.BuildSetting) string {
+	var revision string
+	var modified bool
+	for _, setting := range settings {
+		switch setting.Key {
+		case "vcs.revision":
+			revision = setting.Value
+		case "vcs.modified":
+			modified = setting.Value == "true"
+		}
+	}
+	if modified {
+		if revision == "" {
+			return "dirty"
+		}
+		revision += ".dirty"
+	}
+	return revision
+}
+func dateFromMain() string { return date }
 
 // printable picks a non-empty string or returns the provided fallback —
 // used so empty injection slots render as "(none)" instead of a blank.

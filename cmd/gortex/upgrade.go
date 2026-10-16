@@ -32,7 +32,7 @@ const (
 	InstallUnknown   InstallMethod = "unknown"    // manual download / packaged elsewhere
 )
 
-const upgradeRepoURL = "https://github.com/zzet/gortex"
+const upgradeRepoURL = "https://github.com/kordax/gortex"
 
 // detectInstallMethod infers the install method from the binary's path. brew
 // and scoop are recognised by their well-known directory anchors; a binary
@@ -75,61 +75,36 @@ func underDirFold(p, dir string) bool {
 	return underDir(strings.ToLower(p), strings.ToLower(dir))
 }
 
-// installPSScript is the PowerShell installer one-liner documented in
-// docs/installation.md. It honours GORTEX_VERSION for a pin and upgrades in
-// place, moving the old binary aside as gortex.exe.previous — a rename Windows
-// permits on a running executable, so it works while `gortex upgrade` runs.
-const installPSScript = "irm https://get.gortex.dev/install.ps1 | iex"
+// Download the installer from the resolved release tag, not the moving main
+// branch. The installer and the requested binary therefore share a release.
+const forkInstallerBaseURL = "https://raw.githubusercontent.com/kordax/gortex/refs/tags/"
 
 // upgradeInstructions returns the command that updates gortex for the detected
-// install method, honouring a version pin where the method supports it, and
-// whether the upgrade is a manual step (no scripted command). cosign + SHA256
-// verification is preserved: brew/scoop/the installer script all verify, and
-// `go install` builds from the verified module proxy.
+// install method and resolved release tag. Unsupported package managers use
+// the fork release page instead of silently installing an upstream build.
 func upgradeInstructions(m InstallMethod, pinVersion string) (command string, manual bool) {
-	switch m {
-	case InstallBrew:
-		return "brew upgrade gortex", false
-	case InstallScoop:
-		return "scoop update gortex", false
-	case InstallGoInstall:
-		v := pinVersion
-		if v == "" {
-			v = "latest"
-		}
-		return "go install " + upgradeModulePath + "@" + v, false
-	case InstallScript:
-		return "curl -fsSL https://get.gortex.dev | sh", false
-	case InstallScriptPS:
-		// A PowerShell command, printed for the user to paste into PowerShell
-		// and run by --run through powershell.exe (see upgradeExecCommand).
-		// runUpgrade has validated the pin as a semver tag, so it is safe to
-		// splice into the single-quoted literal.
-		if pinVersion != "" && pinVersion != "latest" {
-			return "$env:GORTEX_VERSION='" + normalizeSemver(pinVersion) + "'; " + installPSScript, false
-		}
-		return installPSScript, false
-	default:
+	// The fork keeps its upstream Go module path. go install, Homebrew and
+	// Scoop would therefore replace this build with the upstream distribution.
+	if m != InstallScript || !semver.IsValid(normalizeSemver(pinVersion)) {
 		return "", true
 	}
+	tag := normalizeSemver(pinVersion)
+	return `installer=$(mktemp) && trap 'rm -f "$installer"' EXIT && curl -fsSL --connect-timeout 10 --max-time 120 --output "$installer" ` + forkInstallerBaseURL + tag + `/scripts/install.sh && GORTEX_VERSION='` + tag + `' bash "$installer"`, false
 }
-
-const upgradeModulePath = "github.com/zzet/gortex/cmd/gortex"
 
 // tagFromReleaseLocation extracts the version tag from a GitHub
 // /releases/latest redirect Location (…/releases/tag/v0.49.0 → v0.49.0).
 // Returns "" when the location is not a tag URL.
 func tagFromReleaseLocation(location string) string {
-	const marker = "/releases/tag/"
-	i := strings.Index(location, marker)
-	if i < 0 {
+	const prefix = upgradeRepoURL + "/releases/tag/"
+	if !strings.HasPrefix(location, prefix) {
 		return ""
 	}
-	tag := location[i+len(marker):]
-	if j := strings.IndexAny(tag, "?#"); j >= 0 {
-		tag = tag[:j]
+	tag := strings.SplitN(strings.SplitN(strings.TrimPrefix(location, prefix), "?", 2)[0], "#", 2)[0]
+	if !semver.IsValid(tag) {
+		return ""
 	}
-	return strings.TrimSpace(tag)
+	return tag
 }
 
 // latestReleaseVersion resolves the newest release tag via the
@@ -170,11 +145,11 @@ var upgradeCmd = &cobra.Command{
 	// "update" is what people type — the command's own summary line has always
 	// said "Update gortex…" — and it used to be an unknown-command error.
 	Aliases: []string{"update"},
-	Short:   "Update gortex to the latest release using the method it was installed with",
-	Long: "Detects how this gortex binary was installed (Homebrew, Scoop, go install, or the " +
-		"installer script — install.sh or install.ps1) and runs the matching update command. Pass a version (or set " +
-		"GORTEX_VERSION) to pin a specific release. By default the command is printed; pass --run to " +
-		"execute it. cosign + SHA256 verification is preserved by every supported method.",
+	Short:   "Update the kordax fork from its GitHub releases",
+	Long: "Updates user installations in ~/.local/bin from github.com/kordax/gortex. " +
+		"Pass a release tag (or GORTEX_VERSION) to pin it. The installer checks SHA256 and keeps a backup. " +
+		"By default the command is printed; --run installs and restarts an existing daemon through its supervisor. " +
+		"Package-manager, go install and Windows installations require a manual fork release install.",
 	Args: cobra.MaximumNArgs(1),
 	RunE: runUpgrade,
 }
@@ -205,24 +180,27 @@ func runUpgrade(cmd *cobra.Command, args []string) error {
 
 	current := normalizeSemver(version)
 	target := normalizeSemver(pin)
-	if target == "" {
+	if target == "" || pin == "latest" {
 		if latest, lerr := latestReleaseVersion(); lerr == nil {
 			target = normalizeSemver(latest)
 		} else {
-			fmt.Fprintf(out, "could not check the latest version (%v); proceeding with the upgrade command\n", lerr)
+			return fmt.Errorf("resolve fork release: %w", lerr)
 		}
 	}
 
 	// Already current? Only short-circuit when we actually resolved a target
 	// and the user did not pin a (possibly older/specific) version.
-	if pin == "" && semver.IsValid(current) && semver.IsValid(target) && semver.Compare(current, target) >= 0 {
+	if pin == "" && !strings.HasSuffix(commitFromMain(), ".dirty") && semver.IsValid(current) && semver.IsValid(target) && semver.Compare(current, target) >= 0 {
 		fmt.Fprintf(out, "gortex %s is already the latest release.\n", version)
 		return nil
 	}
 
-	command, manual := upgradeInstructions(method, pin)
+	command, manual := upgradeInstructions(method, target)
 	if manual {
-		fmt.Fprintf(out, "Installed via an unrecognised method — download the latest release from:\n  %s/releases/latest\n", upgradeRepoURL)
+		fmt.Fprintf(out, "Automatic fork updates are unavailable for install method %s. Download from:\n  %s/releases/latest\n", method, upgradeRepoURL)
+		if upgradeRun {
+			return fmt.Errorf("refusing to replace a %s installation automatically", method)
+		}
 		return nil
 	}
 
@@ -239,6 +217,7 @@ func runUpgrade(cmd *cobra.Command, args []string) error {
 		fmt.Fprintf(out, "$ %s\n", command)
 		run := func() error {
 			ex := upgradeExecCommand(cmd.Context(), method, command)
+			ex.Env = append(os.Environ(), "GORTEX_INSTALL_DIR="+filepath.Dir(execPath))
 			ex.Stdout, ex.Stderr, ex.Stdin = out, cmd.ErrOrStderr(), os.Stdin
 			return ex.Run()
 		}
@@ -258,13 +237,11 @@ func runUpgrade(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-// validateUpgradePin rejects a pin the install method can't take safely. The
-// PowerShell installer receives the pin spliced into a command string, so only
-// a well-formed release tag (or "latest") may reach it; other methods pass the
-// pin as an argv element (go install also accepts branches and commits).
+// validateUpgradePin permits only release tags before constructing installer
+// commands. Branches and arbitrary shell input are never update targets.
 func validateUpgradePin(method InstallMethod, pin string) error {
-	if method == InstallScriptPS && pin != "" && pin != "latest" && !semver.IsValid(normalizeSemver(pin)) {
-		return fmt.Errorf("invalid version %q: expected a release tag such as v0.64.0", pin)
+	if pin != "" && pin != "latest" && !semver.IsValid(normalizeSemver(pin)) {
+		return fmt.Errorf("invalid version %q: expected a release tag such as v1.0.0", pin)
 	}
 	return nil
 }
@@ -281,7 +258,7 @@ func upgradeExecCommand(ctx context.Context, method InstallMethod, command strin
 		return exec.CommandContext(ctx, "powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command) //nolint:gosec // fixed installer template; pin validated as semver
 	}
 	if upgradeCommandNeedsShell(command) {
-		return exec.CommandContext(ctx, "sh", "-c", command) //nolint:gosec // fixed installer template, needs shell for pipe
+		return exec.CommandContext(ctx, "bash", "-o", "pipefail", "-c", command) //nolint:gosec // fixed installer template, needs shell for pipe
 	}
 	parts := strings.Fields(command)
 	return exec.CommandContext(ctx, parts[0], parts[1:]...) //nolint:gosec // command is one of the fixed install-method templates
