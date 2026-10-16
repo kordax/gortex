@@ -147,7 +147,10 @@ func TestDaemonRebindsLogicalMCPStateAcrossRealSocketReconnect(t *testing.T) {
 	t.Cleanup(func() {
 		_ = server.Shutdown()
 		select {
-		case <-serveDone:
+		case err := <-serveDone:
+			if err != nil {
+				t.Errorf("daemon serve: %v", err)
+			}
 		case <-time.After(2 * time.Second):
 			t.Error("daemon did not stop")
 		}
@@ -231,7 +234,10 @@ func TestDaemonReplaysCanonicalIDAfterRealSocketLoss(t *testing.T) {
 	t.Cleanup(func() {
 		_ = server.Shutdown()
 		select {
-		case <-serveDone:
+		case err := <-serveDone:
+			if err != nil {
+				t.Errorf("daemon serve: %v", err)
+			}
 		case <-time.After(2 * time.Second):
 			t.Error("daemon did not stop")
 		}

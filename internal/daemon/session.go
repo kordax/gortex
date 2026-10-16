@@ -17,9 +17,9 @@ import (
 // lives here; shared state (the graph, feedback store, cumulative savings)
 // lives on the Server.
 //
-// A Session is created on a successful handshake and destroyed when its
-// socket connection closes. The daemon routes every inbound frame to its
-// session by looking up the net.Conn in the session registry.
+// A Session is created on a successful handshake. Logical MCP sessions can
+// outlive their socket for reconnect; transport-managed sessions can have no
+// daemon-owned socket. The registry routes frames and retains logical state.
 type Session struct {
 	ID string
 	// LogicalSessionID is non-empty for an MCP proxy session that may detach
@@ -347,7 +347,7 @@ func (s *Session) SnapshotClientInfo() (name, version string) {
 	return s.ClientName, s.ClientVersion
 }
 
-// SessionRegistry tracks active sessions. Safe for concurrent access from
+// SessionRegistry tracks registered sessions and reconnect records. Safe for concurrent access from
 // the accept goroutine and the control-surface handlers.
 type SessionRegistry struct {
 	mu       sync.RWMutex
@@ -488,8 +488,8 @@ func (r *SessionRegistry) IsAttached(id string) bool {
 	return s != nil && s.Conn != nil
 }
 
-// Remove deletes the session for a connection. Idempotent — safe to call
-// from both the accept-loop's defer and the shutdown path.
+// Remove detaches a connection, retaining logical sessions for reconnect.
+// Ordinary sessions are deleted. Idempotent across both teardown paths.
 func (r *SessionRegistry) Remove(conn net.Conn) *Session {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -522,8 +522,8 @@ func (r *SessionRegistry) Get(conn net.Conn) *Session {
 	return r.byConn[conn]
 }
 
-// Count returns the number of live sessions — used by the status command
-// and for metrics.
+// Count returns all registered sessions, including logical reconnect records.
+// Use statusSnapshot to distinguish sockets, retained and managed transports.
 func (r *SessionRegistry) Count() int {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -560,7 +560,7 @@ func (r *SessionRegistry) SweepDead(isAlive func(int) bool) []*Session {
 	return dead
 }
 
-// All returns a snapshot of every live session. The caller must not
+// All returns a snapshot of every registered session. The caller must not
 // mutate the returned Session objects; they're shared with the registry.
 func (r *SessionRegistry) All() []*Session {
 	r.mu.RLock()

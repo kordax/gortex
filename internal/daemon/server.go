@@ -760,7 +760,12 @@ func (s *Server) handleControl(ctx context.Context, _ *Session, req ControlReque
 		pr.Version = s.Version
 		pr.PID = os.Getpid()
 		pr.UptimeSeconds = int64(time.Since(s.started).Seconds())
-		pr.Sessions = s.sessions.Count()
+		snapshot := s.sessions.statusSnapshot(false)
+		pr.Sessions = snapshot.total
+		pr.SessionCountsKnown = true
+		pr.SocketSessions = snapshot.socket
+		pr.RetainedSessions = snapshot.retained
+		pr.TransportSessions = snapshot.transport
 		buf, _ := json.Marshal(pr)
 		return ControlResponse{OK: true, Result: buf}
 
@@ -789,33 +794,15 @@ func (s *Server) handleControl(ctx context.Context, _ *Session, req ControlReque
 		st.PID = os.Getpid()
 		st.UptimeSeconds = int64(time.Since(s.started).Seconds())
 		st.SocketPath = s.SocketPath
-		st.Sessions = s.sessions.Count()
-		// Per-session detail (cwd, client name, connect time) for the
-		// status command's "sessions" block. The controller can't see
-		// these — sessions live on the daemon server, not the
-		// MultiIndexer — so we attach them here. Sorted newest-first
-		// so the list reads as "what's connected right now".
-		if all := s.sessions.All(); len(all) > 0 {
-			now := time.Now()
-			rows := make([]MCPSessionStatus, 0, len(all))
-			for _, sess := range all {
-				if sess == nil {
-					continue
-				}
-				name, version := sess.SnapshotClientInfo()
-				row := MCPSessionStatus{
-					ID:            sess.ID,
-					Cwd:           sess.CWD,
-					ClientName:    name,
-					ClientVersion: version,
-				}
-				if !sess.StartedAt.IsZero() {
-					row.ConnectedSecs = int64(now.Sub(sess.StartedAt).Seconds())
-				}
-				rows = append(rows, row)
-			}
-			st.MCPSessions = rows
-		}
+		// Counts and rows share one registry snapshot: a concurrent detach or
+		// rebind cannot make the breakdown disagree with the listed states.
+		snapshot := s.sessions.statusSnapshot(true)
+		st.Sessions = snapshot.total
+		st.SessionCountsKnown = true
+		st.SocketSessions = snapshot.socket
+		st.RetainedSessions = snapshot.retained
+		st.TransportSessions = snapshot.transport
+		st.MCPSessions = snapshot.rows
 		// Binary-drift self-report: did the on-disk daemon image get
 		// replaced under this running process? See populateBinaryStatus.
 		s.populateBinaryStatus(&st)

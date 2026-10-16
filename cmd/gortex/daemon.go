@@ -1386,7 +1386,11 @@ func renderDaemonHeader(w io.Writer, st daemon.StatusResponse) {
 	} else if !st.Ready && st.IndexDegraded {
 		t.AppendRow(table.Row{"index", fmt.Sprintf("degraded — %d failed files (%d unreadable)", st.FailedFiles, st.UnreadableFiles)})
 	}
-	t.AppendRow(table.Row{"sessions", st.Sessions})
+	if st.SessionCountsKnown {
+		t.AppendRow(table.Row{"sessions", fmt.Sprintf("%d total: %d socket, %d retained, %d transport", st.Sessions, st.SocketSessions, st.RetainedSessions, st.TransportSessions)})
+	} else {
+		t.AppendRow(table.Row{"sessions", st.Sessions})
+	}
 	if st.MemoryBytes > 0 {
 		t.AppendRow(table.Row{"memory", formatBytes(st.MemoryBytes)})
 	}
@@ -1822,9 +1826,8 @@ func renderDaemonWorkspaces(w io.Writer, st daemon.StatusResponse) {
 	t.Render()
 }
 
-// renderDaemonSessions lists every connected MCP client. Skipped
-// when no sessions are registered — single-process stdio embeds
-// don't go through the daemon socket so they never show up here.
+// renderDaemonSessions lists registered clients and their connection states.
+// Single-process stdio embeds do not register with the daemon.
 func renderDaemonSessions(w io.Writer, st daemon.StatusResponse) {
 	if len(st.MCPSessions) == 0 {
 		return
@@ -1834,23 +1837,29 @@ func renderDaemonSessions(w io.Writer, st daemon.StatusResponse) {
 	t.SetOutputMirror(w)
 	t.SetStyle(table.StyleLight)
 	t.Style().Format.Header = text.FormatDefault
-	t.AppendHeader(table.Row{"id", "client", "version", "connected", "cwd"})
+	t.AppendHeader(table.Row{"id", "client", "version", "state", "age", "cwd"})
 	t.SetColumnConfigs([]table.ColumnConfig{
 		{Number: 1, Align: text.AlignLeft},
 		{Number: 2, Align: text.AlignLeft},
 		{Number: 3, Align: text.AlignLeft},
-		{Number: 4, Align: text.AlignRight},
-		{Number: 5, Align: text.AlignLeft},
+		{Number: 4, Align: text.AlignLeft},
+		{Number: 5, Align: text.AlignRight},
+		{Number: 6, Align: text.AlignLeft},
 	})
 	for _, s := range st.MCPSessions {
 		client := s.ClientName
 		if client == "" {
 			client = "unknown"
 		}
+		state := s.ConnectionState
+		if state == "" {
+			state = "unknown"
+		}
 		t.AppendRow(table.Row{
 			s.ID,
 			client,
 			s.ClientVersion,
+			state,
 			formatDuration(time.Duration(s.ConnectedSecs) * time.Second),
 			s.Cwd,
 		})

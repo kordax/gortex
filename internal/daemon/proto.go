@@ -286,7 +286,12 @@ type ProbeResponse struct {
 	// grouping. No counts, no byte estimates, and no on-disk liveness stat:
 	// each of those is a scan, and identity is what a scope decision needs.
 	TrackedRepos []ProbeRepo `json:"tracked_repos"`
-	Sessions     int         `json:"sessions"`
+	// Sessions includes retained logical sessions for compatibility.
+	Sessions           int  `json:"sessions"`
+	SessionCountsKnown bool `json:"session_counts_known,omitempty"`
+	SocketSessions     int  `json:"socket_sessions"`
+	RetainedSessions   int  `json:"retained_sessions"`
+	TransportSessions  int  `json:"transport_sessions"`
 }
 
 // ProbeRepo is one tracked repo as ControlProbe reports it.
@@ -312,7 +317,15 @@ type StatusResponse struct {
 	IndexDegraded    bool   `json:"index_degraded,omitempty"`
 	FailedFiles      int    `json:"failed_files,omitempty"`
 	UnreadableFiles  int    `json:"unreadable_files,omitempty"`
-	Sessions         int    `json:"sessions"`
+	// Sessions is the total registered count, including reconnect records.
+	Sessions int `json:"sessions"`
+	// SessionCountsKnown distinguishes new counters from an older daemon's
+	// missing fields. SocketSessions includes control connections;
+	// TransportSessions are active sessions without a daemon-owned socket.
+	SessionCountsKnown bool `json:"session_counts_known,omitempty"`
+	SocketSessions     int  `json:"socket_sessions"`
+	RetainedSessions   int  `json:"retained_sessions"`
+	TransportSessions  int  `json:"transport_sessions"`
 	// MemoryBytes is runtime.MemStats.Alloc — live allocated heap.
 	// Retained for backwards compatibility with older clients; new
 	// clients should read from Runtime.
@@ -383,9 +396,8 @@ type StatusResponse struct {
 	// workspace; the table form is more compact in that case).
 	Workspaces []WorkspaceSummary `json:"workspaces,omitempty"`
 
-	// MCPSessions lists every connected proxy client (Claude Code,
-	// Cursor, Codex, etc.). Empty when the daemon hasn't yet been
-	// asked to track sessions.
+	// MCPSessions lists registered sessions, including retained reconnect
+	// records. ConnectionState distinguishes these from active transports.
 	MCPSessions []MCPSessionStatus `json:"mcp_sessions,omitempty"`
 
 	// ConfiguredServers reflects `~/.gortex/servers.toml` when
@@ -914,7 +926,11 @@ type MCPSessionStatus struct {
 	Cwd           string `json:"cwd,omitempty"`
 	ClientName    string `json:"client_name,omitempty"`
 	ClientVersion string `json:"client_version,omitempty"`
-	ConnectedSecs int64  `json:"connected_secs"`
+	// ConnectedSecs is age since registration, including reconnect retention.
+	ConnectedSecs int64 `json:"connected_secs"`
+	// ConnectionState is socket, retained, or transport. Empty means unknown
+	// when a new client reads status from an older daemon.
+	ConnectionState string `json:"connection_state,omitempty"`
 }
 
 // ConfiguredServerStatus is one row in the servers list, mirroring a
