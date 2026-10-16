@@ -10,22 +10,48 @@ cat > "$fixture/tools/curl" <<'CURL'
 #!/usr/bin/env bash
 set -euo pipefail
 out=
-latest=false
+writeout=
+speed_time= speed_limit= max_time=
+progress=false
+silent=false
 url=
 while (($#)); do
   case "$1" in
     --output) out=$2; shift 2 ;;
-    --write-out) shift 2; latest=true ;;
-    --proto|--proto-redir|--connect-timeout|--max-time) shift 2 ;;
+    --write-out) writeout=$2; shift 2 ;;
+    --speed-time) speed_time=$2; shift 2 ;;
+    --speed-limit) speed_limit=$2; shift 2 ;;
+    --max-time) max_time=$2; shift 2 ;;
+    --progress-bar) progress=true; shift ;;
+    --silent) silent=true; shift ;;
+    --proto|--proto-redir|--connect-timeout) shift 2 ;;
     --*) shift ;;
     *) url=$1; shift ;;
   esac
 done
 printf '%s\n' "$url" >> "$INSTALL_TEST_ROOT/requests"
-if $latest; then
+[[ -n $speed_time && -n $speed_limit && -n $max_time ]]
+((speed_time > 0 && speed_time <= 60 && speed_limit > 0 && max_time >= speed_time))
+if [[ $writeout == '%{url_effective}' ]]; then
+  if [[ ${INSTALL_TEST_REQUIRE_LOGS:-0} == 1 ]]; then
+    grep -F 'Resolving the latest fork release' "$INSTALL_TEST_ROOT/output" >/dev/null
+  fi
   printf 'https://github.com/kordax/gortex/releases/tag/v1.0.0'
 else
+  if [[ ${INSTALL_TEST_REQUIRE_LOGS:-0} == 1 ]]; then
+    # Inspect while curl is only just starting, before a single payload byte
+    # is copied. A silent installer fails here, not after installation ends.
+    grep -F '[2/6] Download release artifacts' "$INSTALL_TEST_ROOT/output" >/dev/null
+    grep -F "Downloading ${url##*/}..." "$INSTALL_TEST_ROOT/output" >/dev/null
+  fi
+  if [[ -t 2 && ${TERM:-dumb} != dumb ]]; then
+    $progress && ! $silent
+  else
+    $silent && ! $progress
+  fi
+  if [[ ${INSTALL_TEST_DOWNLOAD_FAILURE:-0} == 1 ]]; then exit 28; fi
   cp "$INSTALL_TEST_ROOT/assets/${url##*/}" "$out"
+  printf '%s 0.010 1000' "$(wc -c < "$out" | tr -d ' ')"
 fi
 CURL
 # Keep cosign behavior deterministic even if it is installed on the host.
@@ -71,7 +97,7 @@ PROBE
   : > "$fixture/assets/$asset.sig"
   : > "$fixture/assets/$asset.pem"
 }
-run_installer() { INSTALL_TEST_PROBE_REQUIRED=1 sh "$installer" > "$fixture/output" 2>&1; }
+run_installer() { INSTALL_TEST_REQUIRE_LOGS=1 INSTALL_TEST_PROBE_REQUIRED=1 sh "$installer" > "$fixture/output" 2>&1; }
 expect_failure() {
   if run_installer; then echo "FAIL: expected rejection: $*"; exit 1; fi
   [[ $("$GORTEX_INSTALL_DIR/gortex" version) == "$installed" ]] || { echo 'FAIL: rejected install changed destination'; exit 1; }
@@ -79,6 +105,12 @@ expect_failure() {
 }
 make_release
 run_installer
+for expected_step in '1/6] Resolve release' '2/6] Download release artifacts' '3/6] Verify checksums and signatures' '4/6] Validate the executable' '5/6] Install atomically' '6/6] Installation complete'; do
+  grep -F "$expected_step" "$fixture/output" >/dev/null
+done
+grep -F 'Downloaded gortex_' "$fixture/output" >/dev/null
+grep -E 'Downloaded .*: [0-9.]+ (B|KiB|MiB|GiB) in' "$fixture/output" >/dev/null
+if grep -q $'\033' "$fixture/output"; then echo 'FAIL: ANSI escapes in redirected logs'; exit 1; fi
 installed=$("$GORTEX_INSTALL_DIR/gortex" version)
 [[ "$installed" == *'fork by kordax'* ]]
 # An existing upstream binary still wins when the destination is later in PATH.
@@ -100,6 +132,10 @@ grep -F 'https://github.com/kordax/gortex/.github/workflows/release.yml@refs/tag
 [[ ! -e "$HOME/.profile" && ! -e "$HOME/.bashrc" ]]
 GORTEX_VERSION=1.0.0 run_installer
 [[ $("$GORTEX_INSTALL_DIR/gortex.previous" version) == "$installed" ]]
+INSTALL_TEST_DOWNLOAD_FAILURE=1 expect_failure 'stalled download'
+grep -F "Download failed for $asset (curl exit 28)" "$fixture/output" >/dev/null
+grep -F 'Stopped at step 2/6: Download release artifacts.' "$fixture/output" >/dev/null
+if grep -q 'Installation complete' "$fixture/output"; then echo 'FAIL: failed download reported success'; exit 1; fi
 printf '%064d  %s\n' 0 "$asset" > "$fixture/assets/checksums.txt"
 expect_failure 'checksum mismatch'
 make_release

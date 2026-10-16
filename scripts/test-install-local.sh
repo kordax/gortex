@@ -39,8 +39,16 @@ write_binary "$installer_test_root/source/two" 'v2.0.0+test'
 # Dry-run validation never creates the destination directory.
 run_installer --dry-run --binary "$installer_test_root/source/one" || fail 'dry run'
 [[ ! -e $prefix ]] || fail 'dry run created destination'
+installer_output=$(<"$installer_test_root/last.log")
+[[ $installer_output == *'[1/3] Prepare destination'* && $installer_output == *'[3/3] Verify version and fork identity'* ]] || fail 'missing dry-run steps'
+[[ $installer_output != *$'\033'* ]] || fail 'ANSI escapes in redirected output'
 run_installer --binary "$installer_test_root/source/one" || fail 'initial install'
 assert_version "$prefix/gortex" 'v1.0.0+test'
+installer_output=$(<"$installer_test_root/last.log")
+for installer_step in '1/6] Prepare destination' '2/6] Prepare executable' '3/6] Verify version and fork identity' '4/6] Stage candidate and preserve current binary' '5/6] Install atomically and verify' '6/6] Installation complete'; do
+    [[ $installer_output == *"$installer_step"* ]] || fail "missing step: $installer_step"
+done
+[[ $installer_output == *'Source: trusted local binary'* ]] || fail 'missing installation source'
 [[ ! -e $prefix/gortex.previous ]] || fail 'initial install invented a backup'
 assert_unlocked
 # Merely appearing somewhere in PATH is insufficient: an older command can
@@ -93,9 +101,13 @@ assert_unlocked
 
 # Compilers failing before publication leave the current install alone.
 mkdir -p -- "$installer_test_root/fake-tools"
-printf '#!/usr/bin/env bash\nexit 42\n' >"$installer_test_root/fake-tools/go"
+printf '#!/usr/bin/env bash\nprintf "compiler fixture failed\\n" >&2\nexit 42\n' >"$installer_test_root/fake-tools/go"
 chmod 0755 -- "$installer_test_root/fake-tools/go"
 if PATH="$installer_test_root/fake-tools:$PATH" run_installer; then fail 'compiler failure was ignored'; fi
+installer_output=$(<"$installer_test_root/last.log")
+[[ $installer_output == *'Source: local checkout'* && $installer_output == *'Building checkout'* ]] || fail 'missing local build status'
+[[ $installer_output == *'compiler fixture failed'* && $installer_output == *'Stopped at step 2/6: Prepare executable.'* ]] || fail 'missing compiler failure details'
+[[ $installer_output != *'Installation complete'* ]] || fail 'failed build reported success'
 assert_version "$prefix/gortex" 'v2.0.0+test'
 assert_version "$prefix/gortex.previous" 'v1.0.0+test'
 assert_unlocked

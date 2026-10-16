@@ -23,7 +23,67 @@ explicitly restart it.
 USAGE
 }
 
-die() { printf 'install-local: %s\n' "$*" >&2; exit 1; }
+ui_terminal=0
+ui_accent='' ui_success='' ui_error='' ui_bold='' ui_dim='' ui_reset=''
+if [[ -t 2 && ${TERM:-dumb} != dumb ]]; then
+    ui_terminal=1
+    if [[ -z ${NO_COLOR:-} ]]; then
+        ui_accent=$'\033[36m' ui_success=$'\033[32m' ui_error=$'\033[31m'
+        ui_bold=$'\033[1m' ui_dim=$'\033[2m' ui_reset=$'\033[0m'
+    fi
+fi
+step_number=0
+step_total=6
+step_title=Arguments
+spinner_pid=''
+log() { printf '    %s\n' "$*" >&2; }
+step() {
+    step_number=$((step_number + 1))
+    step_title=$1
+    printf '\n  %s%s[%s/%s] %s%s\n' "$ui_bold" "$ui_accent" "$step_number" "$step_total" "$step_title" "$ui_reset" >&2
+}
+ok() { printf '    %sOK%s  %s\n' "$ui_success" "$ui_reset" "$*" >&2; }
+stop_spinner() {
+    if [[ -n $spinner_pid ]]; then
+        kill "$spinner_pid" 2>/dev/null || true
+        wait "$spinner_pid" 2>/dev/null || true
+        spinner_pid=''
+        printf '\r\033[2K' >&2
+    fi
+}
+start_spinner() {
+    if ((ui_terminal)); then
+        (
+            trap - EXIT
+            trap 'exit 0' TERM INT
+            ui_frames="|/-\\"
+            ui_frame_index=0
+            ui_started=$SECONDS
+            while :; do
+                ui_elapsed=$((SECONDS - ui_started))
+                printf '\r    %s%s%s Building checkout... %02d:%02d' "$ui_accent" "${ui_frames:ui_frame_index:1}" "$ui_reset" "$((ui_elapsed / 60))" "$((ui_elapsed % 60))" >&2
+                ui_frame_index=$(((ui_frame_index + 1) % 4))
+                sleep 0.1
+            done
+        ) &
+        spinner_pid=$!
+    fi
+}
+die() {
+    stop_spinner
+    printf '\n  %s%sFAILED%s  %s\n' "$ui_bold" "$ui_error" "$ui_reset" "$*" >&2
+    log "Stopped at step $step_number/$step_total: $step_title."
+    exit 1
+}
+cancel() {
+    stop_spinner
+    printf '\n  %sCANCELLED%s  %s\n' "$ui_dim" "$ui_reset" "$step_title" >&2
+    log 'The running daemon was not restarted.'
+    exit "$1"
+}
+complete_bar() {
+    if ((ui_terminal)); then printf '    %s[########################] 100%%%s\n\n' "$ui_success" "$ui_reset" >&2; fi
+}
 
 source_binary=''
 rollback=0
@@ -64,6 +124,7 @@ lock_dir="$install_dir/.gortex-install.lock"
 cleanup() {
     local result=$?
     trap - EXIT
+    stop_spinner
     if ((published && !committed)); then
         # Only undo the executable this invocation published. Retain a recovery
         # copy if another process has replaced the destination meanwhile.
@@ -87,9 +148,9 @@ cleanup() {
     exit "$result"
 }
 trap cleanup EXIT
-trap 'exit 130' INT
-trap 'exit 143' TERM
-trap 'exit 129' HUP
+trap 'cancel 130' INT
+trap 'cancel 143' TERM
+trap 'cancel 129' HUP
 
 check_destination() {
     local path
@@ -111,6 +172,20 @@ report_command_path() {
     fi
 }
 
+if ((dry_run)); then step_total=3; fi
+printf '\n  %s%sG O R T E X%s  %sfork by kordax%s\n' "$ui_bold" "$ui_accent" "$ui_reset" "$ui_dim" "$ui_reset" >&2
+printf '  %sLocal build / binary installer%s\n\n' "$ui_dim" "$ui_reset" >&2
+if ((rollback)); then
+    log 'Source: saved previous binary (rollback)'
+elif [[ -n $source_binary ]]; then
+    log "Source: trusted local binary $source_binary"
+else
+    log "Source: local checkout $repo_root"
+    log 'Build locally; no published release archive will be downloaded.'
+fi
+log "Destination: $target"
+if ((dry_run)); then log 'Dry run: the destination will not be changed.'; fi
+step 'Prepare destination'
 if (( ! dry_run )); then
     mkdir -p -- "$install_dir"
     install_dir=$(cd -- "$install_dir" && pwd -P)
@@ -125,7 +200,9 @@ fi
 check_destination
 
 if ((rollback)); then source_binary=$backup; fi
+step 'Prepare executable'
 if [[ -n $source_binary ]]; then
+    log "Copying $source_binary..."
     [[ -f $source_binary && -x $source_binary ]] || die "not an executable regular file: $source_binary"
     cp -L -- "$source_binary" "$candidate"
     chmod 0755 -- "$candidate"
@@ -137,14 +214,23 @@ else
         revision+=.dirty
     fi
     build_date=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-    printf 'Building checkout %s with %s\n' "$revision" "${GOTOOLCHAIN:-go1.27.2}"
-    (
+    log "Building checkout $revision with ${GOTOOLCHAIN:-go1.27.2}..."
+    log 'The first build may download the Go toolchain and module dependencies.'
+    start_spinner
+    if (
         cd -- "$repo_root"
         GOTOOLCHAIN="${GOTOOLCHAIN:-go1.27.2}" CGO_ENABLED=1 go build \
             -mod=readonly -trimpath -buildvcs=true \
             -ldflags "-s -w -X main.commit=$revision -X main.date=$build_date" \
             -o "$candidate" ./cmd/gortex
-    )
+    ) > "$work_dir/build.log" 2>&1; then
+        stop_spinner
+        ok 'Local build complete.'
+    else
+        stop_spinner
+        cat "$work_dir/build.log" >&2
+        die 'Local build failed; the installed binary was not changed.'
+    fi
 fi
 
 # Version probes must not migrate the caller's configuration or write session
@@ -159,33 +245,45 @@ probe_version() {
         XDG_STATE_HOME="$work_dir/probe-home/state" XDG_RUNTIME_DIR="$work_dir/probe-runtime" \
         GORTEX_SESSION_ID= "$binary" version "$@"
 }
+step 'Verify version and fork identity'
 candidate_version=$(probe_version "$candidate" --short) || die 'candidate version check failed'
 [[ $candidate_version =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]] || die 'candidate returned an invalid version'
 if (( ! rollback )); then
     candidate_identity=$(probe_version "$candidate") || die 'candidate identity check failed'
     [[ $candidate_identity == *'fork by kordax'* && $candidate_identity == *'https://github.com/kordax/gortex'* ]] || die 'candidate is not the kordax fork'
 fi
-printf 'Validated %s\nTarget: %s\n' "$candidate_version" "$target"
-if (( ! rollback )); then printf '%s\n' "$candidate_identity"; fi
+ok "Validated $candidate_version"
+log "Target: $target"
+if (( ! rollback )); then printf '%s\n' "$candidate_identity" | sed 's/^/    /' >&2; fi
 if ((dry_run)); then
+    complete_bar
     printf 'Dry run complete; destination unchanged.\n'
     exit 0
 fi
 if [[ -f $target ]] && cmp -s -- "$candidate" "$target"; then
+    step 'Stage candidate'
+    log 'Skipped: the same binary is already installed.'
+    step 'Verify installed executable'
+    ok 'Installed bytes match; backup unchanged.'
+    step 'Installation complete'
+    complete_bar
     printf 'The same binary is already installed; backup unchanged.\n'
     report_command_path
     exit 0
 fi
 
+step 'Stage candidate and preserve current binary'
 stage_dir=$(mktemp -d -- "$install_dir/.gortex-local-stage.XXXXXX")
 install -m 0755 -- "$candidate" "$stage_dir/new"
 cmp -s -- "$candidate" "$stage_dir/new" || die 'staged binary differs from candidate'
 if [[ -f $target ]]; then
+    log "Preserving the current executable for rollback..."
     cp -p -- "$target" "$stage_dir/old"
     had_target=1
 fi
 # GNU mv -T replaces the directory entry on the same filesystem. It neither
 # truncates the running executable nor follows a leaf symlink as a directory.
+step 'Install atomically and verify'
 published=1
 mv -fT -- "$stage_dir/new" "$target"
 installed_version=$(probe_version "$target" --short) || die 'installed version check failed; restoring previous binary'
@@ -195,6 +293,9 @@ if ((had_target)); then
     mv -fT -- "$stage_dir/backup" "$backup"
 fi
 committed=1
+step 'Installation complete'
+complete_bar
+ok "$installed_version"
 printf 'Installed %s at %s\n' "$installed_version" "$target"
 if ((had_target)); then printf 'Previous binary: %s\n' "$backup"; fi
 printf 'Configuration and running daemon unchanged.\n'
