@@ -62,8 +62,10 @@ func TestMain(m *testing.M) {
 	os.Exit(code)
 }
 
-// realUserStatePaths lists the per-user files this package has been
-// caught writing through to, resolved against the ambient environment
+// realUserStatePaths lists the persistent per-user files this package has been
+// caught writing through to. Telemetry is isolated by the sandbox instead:
+// its disposable log can also change when an independent daemon is running.
+// These paths are resolved against the ambient environment
 // before the sandbox is installed. The paths are captured rather than
 // re-resolved afterwards, so the check does not depend on the
 // environment having been restored correctly.
@@ -71,7 +73,6 @@ func realUserStatePaths() []string {
 	paths := []string{
 		config.DefaultGlobalConfigPath(),
 		filepath.Join(platform.ConfigDir(), "servers.toml"),
-		filepath.Join(platform.CacheDir(), "query-log.jsonl"),
 	}
 	if home, err := os.UserHomeDir(); err == nil && home != "" {
 		paths = append(paths,
@@ -101,9 +102,7 @@ func diffUserState(before map[string]string) string {
 	return fmt.Sprintf(
 		"\ncmd/gortex: a test wrote through to the developer's real per-user state:\n%s\n\n"+
 			"Isolate the test with internal/testenv (Sandbox / SandboxAt / UnifiedHome / SetHome)\n"+
-			"instead of t.Setenv(\"HOME\", ...), which does not move os.UserHomeDir on Windows.\n"+
-			"If a gortex daemon was running and tracked a repository during this run, that is a\n"+
-			"false positive — re-run with the daemon stopped to confirm.\n",
+			"instead of t.Setenv(\"HOME\", ...), which does not move os.UserHomeDir on Windows.\n",
 		strings.Join(changed, "\n"))
 }
 

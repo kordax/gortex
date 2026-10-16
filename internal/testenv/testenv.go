@@ -77,6 +77,8 @@ func sandboxEnv(d Dirs, root string) map[string]string {
 	env["GORTEX_DAEMON_PIDFILE"] = filepath.Join(root, "daemon.pid")
 	env["GORTEX_DAEMON_LOGFILE"] = filepath.Join(root, "daemon.log")
 	env["GORTEX_DAEMON_SNAPSHOT"] = filepath.Join(root, "daemon.gob.gz")
+	// An explicit telemetry destination also takes precedence over XDG.
+	env["GORTEX_QUERY_LOG"] = filepath.Join(root, "query-log.jsonl")
 	return env
 }
 

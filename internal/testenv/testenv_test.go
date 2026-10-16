@@ -5,6 +5,9 @@ import (
 	"path/filepath"
 	"runtime"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // TestSetHomeRedirectsUserHomeDir is the regression guard for the bug
@@ -129,5 +132,47 @@ func TestSandboxRestoresAmbientEnvironment(t *testing.T) {
 	}
 	if after != before {
 		t.Fatalf("ambient home leaked: was %s, now %s", before, after)
+	}
+}
+
+func TestSandboxesIsolateAndRestoreQueryLogOverride(t *testing.T) {
+	for _, inherited := range []bool{false, true} {
+		name := "unset"
+		if inherited {
+			name = "set"
+		}
+		t.Run(name, func(t *testing.T) {
+			external := filepath.Join(t.TempDir(), "external-query-log.jsonl")
+			t.Setenv("GORTEX_QUERY_LOG", external)
+			if !inherited {
+				require.NoError(t, os.Unsetenv("GORTEX_QUERY_LOG"))
+			}
+			before, existed := os.LookupEnv("GORTEX_QUERY_LOG")
+			t.Run("test sandbox", func(t *testing.T) {
+				dirs := SandboxAt(t, t.TempDir())
+				isolated := os.Getenv("GORTEX_QUERY_LOG")
+				require.NotEmpty(t, isolated)
+				assert.NotEqual(t, external, isolated)
+				assert.Equal(t, filepath.Dir(dirs.Config), filepath.Dir(isolated), "telemetry must be inside the sandbox")
+			})
+			after, stillExists := os.LookupEnv("GORTEX_QUERY_LOG")
+			assert.Equal(t, before, after)
+			assert.Equal(t, existed, stillExists)
+
+			var processLog string
+			func() {
+				restore, err := SandboxProcess()
+				require.NoError(t, err)
+				defer restore()
+				processLog = os.Getenv("GORTEX_QUERY_LOG")
+				require.NotEmpty(t, processLog)
+				assert.NotEqual(t, external, processLog)
+				assert.DirExists(t, filepath.Dir(processLog), "process telemetry must be in its private temporary tree")
+			}()
+			after, stillExists = os.LookupEnv("GORTEX_QUERY_LOG")
+			assert.Equal(t, before, after)
+			assert.Equal(t, existed, stillExists)
+			assert.NoDirExists(t, filepath.Dir(processLog), "restoring the process must clean up its telemetry tree")
+		})
 	}
 }
