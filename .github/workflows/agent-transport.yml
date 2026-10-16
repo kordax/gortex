@@ -1,0 +1,54 @@
+name: Agent transport
+
+on:
+  workflow_dispatch:
+    inputs:
+      scenario:
+        description: Transport correctness or mixed latency workload
+        type: choice
+        options:
+          - transport
+          - mixed
+        default: transport
+        required: true
+      clients:
+        description: Query clients, plus one writer (1 to 32)
+        default: '4'
+        required: true
+      rounds:
+        description: Requests per session (mixed needs at least 3)
+        default: '25'
+        required: true
+      files:
+        description: Fixture source files (32 to 10000)
+        default: '128'
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  transport:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - name: Exercise isolated daemon and MCP proxies
+        env:
+          GORTEX_AGENT_SCENARIO: ${{ inputs.scenario }}
+          GORTEX_AGENT_MIXED_CLIENTS: ${{ inputs.clients }}
+          GORTEX_AGENT_CLIENTS: ${{ inputs.clients }}
+          GORTEX_AGENT_ROUNDS: ${{ inputs.rounds }}
+          GORTEX_AGENT_FILES: ${{ inputs.files }}
+          GORTEX_AGENT_ARTIFACT_DIR: ${{ runner.temp }}/agent-transport
+        run: bash scripts/test-agent-transport.sh
+      - name: Upload profiles, latency samples and child logs
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: agent-transport
+          path: ${{ runner.temp }}/agent-transport
+          retention-days: 7

@@ -292,11 +292,17 @@ func (f *issue767Fixture) stop() {
 	f.cmd = nil
 	_ = cmd.Process.Signal(os.Interrupt)
 	select {
-	case <-done:
+	case err := <-done:
+		if err != nil {
+			f.t.Logf("isolated child %d exited after interrupt: %v", cmd.Process.Pid, err)
+		}
 	case <-time.After(30 * time.Second):
 		_ = cmd.Process.Kill()
 		select {
-		case <-done:
+		case err := <-done:
+			if err != nil {
+				f.t.Logf("isolated child %d exited after kill: %v", cmd.Process.Pid, err)
+			}
 		case <-time.After(5 * time.Second):
 			f.t.Errorf("isolated child %d did not exit after kill", cmd.Process.Pid)
 		}
