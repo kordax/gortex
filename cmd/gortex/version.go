@@ -35,6 +35,9 @@ func init() {
 	versionCmd.Flags().BoolVar(&versionShort, "short", false,
 		"print just the canonical SemVer string (useful for scripts)")
 	rootCmd.AddCommand(versionCmd)
+	rootCmd.Version = canonicalVersion()
+	cobra.AddTemplateFunc("gortexVersionSummary", versionSummary)
+	rootCmd.SetVersionTemplate("{{gortexVersionSummary}}")
 }
 
 func runVersion(cmd *cobra.Command, _ []string) {
@@ -51,7 +54,17 @@ func runVersion(cmd *cobra.Command, _ []string) {
 		return
 	}
 
-	w := cmd.OutOrStdout()
+	fmt.Fprint(cmd.OutOrStdout(), versionSummary())
+}
+
+// versionSummary is shared by the version command and Cobra's -v/--version flags.
+func versionSummary() string {
+	v, err := semver.Compose(versionFromMain(), commitFromMain())
+	if err != nil {
+		v = semver.Version{Build: commitFromMain()}
+	}
+	var summary bytes.Buffer
+	w := &summary
 	fmt.Fprintf(w, "gortex %s (fork by kordax)\n", canonical(v))
 	fmt.Fprintf(w, "  source:  %s\n", upgradeRepoURL)
 	if v.IsZero() && v.Build == "" {
@@ -61,6 +74,7 @@ func runVersion(cmd *cobra.Command, _ []string) {
 	fmt.Fprintf(w, "  built:   %s\n", printable(dateFromMain(), "(unknown)"))
 	fmt.Fprintf(w, "  go:      %s\n", runtime.Version())
 	fmt.Fprintf(w, "  os/arch: %s/%s\n", runtime.GOOS, runtime.GOARCH)
+	return summary.String()
 }
 
 // canonical renders a Version with a graceful fallback for dev builds.
