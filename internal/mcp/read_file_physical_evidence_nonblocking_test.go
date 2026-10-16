@@ -41,8 +41,8 @@ func TestReadFilePhysicalEvidenceSymlinkToFIFOOpensWithoutBlocking(t *testing.T)
 		if writer, oerr := os.OpenFile(fifo, os.O_WRONLY|syscall.O_NONBLOCK, 0); oerr == nil {
 			_ = writer.Close()
 		}
-		<-done
-		t.Fatal("physical evidence blocked while opening a symlink to a FIFO")
+		err := <-done
+		t.Fatalf("physical evidence blocked while opening a symlink to a FIFO: %v", err)
 	}
 }
 

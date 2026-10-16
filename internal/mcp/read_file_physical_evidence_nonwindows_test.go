@@ -33,7 +33,7 @@ func TestReadFilePhysicalEvidenceRejectsFIFOWithoutBlocking(t *testing.T) {
 		if err == nil {
 			_ = writer.Close()
 		}
-		<-done
-		t.Fatal("physical evidence blocked while opening a FIFO")
+		readErr := <-done
+		t.Fatalf("physical evidence blocked while opening a FIFO: %v", readErr)
 	}
 }

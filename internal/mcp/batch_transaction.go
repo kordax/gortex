@@ -38,29 +38,31 @@ type plannedBatchEdit struct {
 }
 
 type batchFileBuffer struct {
-	absPath      string
-	relPath      string
-	mode         os.FileMode // permission bits preserved when writing replacement files
-	fileMode     os.FileMode // complete mode retained for symlink and regular-file checks
-	followedInfo os.FileInfo // identity behind a symlink leaf, so a link and its target are one file
-	original     []byte
-	content      []byte
-	existsBefore bool
-	existsAfter  bool
-	existenceSet bool
+	absPath             string
+	relPath             string
+	mode                os.FileMode // permission bits preserved when writing replacement files
+	fileMode            os.FileMode // complete mode retained for symlink and regular-file checks
+	followedInfo        os.FileInfo // identity behind a symlink leaf, so a link and its target are one file
+	beforeSymlinkTarget string      // original directory entry restored on rollback
+	original            []byte
+	content             []byte
+	existsBefore        bool
+	existsAfter         bool
+	existenceSet        bool
 }
 
 type batchTransactionFile struct {
-	Path              string      `json:"path"`
-	RelativePath      string      `json:"relative_path,omitempty"`
-	Mode              os.FileMode `json:"mode"`
-	BeforeSHA256      string      `json:"before_sha256,omitempty"`
-	AfterSHA256       string      `json:"after_sha256,omitempty"`
-	BeforeAbsent      bool        `json:"before_absent,omitempty"`
-	AfterAbsent       bool        `json:"after_absent,omitempty"`
-	Backup            string      `json:"backup,omitempty"`
-	ReindexReceipt    string      `json:"reindex_receipt,omitempty"`
-	ReindexGeneration uint64      `json:"reindex_generation,omitempty"`
+	Path                string      `json:"path"`
+	RelativePath        string      `json:"relative_path,omitempty"`
+	Mode                os.FileMode `json:"mode"`
+	BeforeSHA256        string      `json:"before_sha256,omitempty"`
+	BeforeSymlinkTarget string      `json:"before_symlink_target,omitempty"`
+	AfterSHA256         string      `json:"after_sha256,omitempty"`
+	BeforeAbsent        bool        `json:"before_absent,omitempty"`
+	AfterAbsent         bool        `json:"after_absent,omitempty"`
+	Backup              string      `json:"backup,omitempty"`
+	ReindexReceipt      string      `json:"reindex_receipt,omitempty"`
+	ReindexGeneration   uint64      `json:"reindex_generation,omitempty"`
 }
 
 type batchTransactionReceipt struct {
@@ -587,6 +589,18 @@ func batchPathBytes(path, relPath string) (os.FileInfo, []byte, error) {
 	case err != nil:
 		return nil, nil, fmt.Errorf("could not stat %s: %w", relPath, err)
 	}
+	// Opening a FIFO can block before a request can observe cancellation.
+	// Content edits may follow a symlink leaf, but its target must be regular.
+	followed := info
+	if info.Mode()&os.ModeSymlink != 0 {
+		followed, err = os.Stat(path)
+		if err != nil {
+			return info, nil, fmt.Errorf("could not stat target of %s: %w", relPath, err)
+		}
+	}
+	if !followed.Mode().IsRegular() {
+		return info, nil, fmt.Errorf("could not read %s: source path is not a regular file", relPath)
+	}
 	content, readErr := os.ReadFile(path)
 	if readErr != nil {
 		return info, nil, fmt.Errorf("could not read %s: %w", relPath, readErr)
@@ -628,6 +642,12 @@ func (s *Server) readBatchBuffers(ctx context.Context, plans []plannedBatchEdit)
 		// destination can be created and rollback can prove it was absent.
 		if info != nil {
 			buffer.fileMode = info.Mode()
+			if info.Mode()&os.ModeSymlink != 0 {
+				buffer.beforeSymlinkTarget, err = os.Readlink(path)
+				if err != nil {
+					return fmt.Errorf("could not read symlink %s: %w", relPath, err)
+				}
+			}
 			buffer.followedInfo = batchFollowedIdentity(path, info)
 			// fileMode intentionally describes the path itself for lifecycle
 			// type checks, while mode follows symlinks so edit_file preserves
@@ -1011,6 +1031,7 @@ func (s *Server) runBatchTransaction(ctx context.Context, edits []batchEditItem,
 	if err != nil {
 		return batchTransactionReceipt{}, err
 	}
+	mutationCommitNoteFrom(ctx).observeBatch(state)
 	if err := guardBatchCheckout(ctx, state.snapshot()); err != nil {
 		return batchTransactionReceipt{}, err
 	}

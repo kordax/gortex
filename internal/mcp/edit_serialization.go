@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"sort"
 	"sync"
@@ -72,6 +73,32 @@ type mutationScheduler interface {
 	EnqueueFileMutation(context.Context, string) (*indexer.MutationTicket, error)
 }
 
+// mutationPathKey resolves aliases of the parent directory while preserving
+// the final directory entry: atomic writes replace a leaf symlink itself.
+// Missing parents are appended beneath the closest existing ancestor.
+func mutationPathKey(path string) (string, error) {
+	absPath, err := filepath.Abs(path)
+	if err != nil {
+		return "", err
+	}
+	parent, suffix := filepath.Dir(absPath), filepath.Base(absPath)
+	for {
+		resolved, err := filepath.EvalSymlinks(parent)
+		if err == nil {
+			return filepath.Join(resolved, suffix), nil
+		}
+		if !errors.Is(err, os.ErrNotExist) {
+			return "", fmt.Errorf("resolve mutation parent %q: %w", parent, err)
+		}
+		next := filepath.Dir(parent)
+		if next == parent {
+			return "", fmt.Errorf("resolve mutation parent %q: %w", parent, err)
+		}
+		suffix = filepath.Join(filepath.Base(parent), suffix)
+		parent = next
+	}
+}
+
 // acquireMutationPath waits for exclusive mutation access to path. Waiting is
 // context-aware: a cancelled MCP request leaves the queue immediately, which
 // lets its dispatcher goroutine finish and release admission capacity.
@@ -79,8 +106,14 @@ func acquireMutationPath(ctx context.Context, path string) (func(), error) {
 	if err := guardCheckoutMutationPath(ctx, path); err != nil {
 		return nil, err
 	}
-	path = filepath.Clean(path)
+	key, err := mutationPathKey(path)
+	if err != nil {
+		return nil, err
+	}
+	return acquireMutationPathLock(ctx, key)
+}
 
+func acquireMutationPathLock(ctx context.Context, path string) (func(), error) {
 	mutationPathLocks.Lock()
 	entry := mutationPathLocks.byPath[path]
 	if entry == nil {
@@ -119,18 +152,24 @@ func acquireMutationPaths(ctx context.Context, paths []string) (func(), error) {
 	unique := make(map[string]struct{}, len(paths))
 	ordered := make([]string, 0, len(paths))
 	for _, path := range paths {
-		clean := filepath.Clean(path)
-		if _, exists := unique[clean]; exists {
+		if err := guardCheckoutMutationPath(ctx, path); err != nil {
+			return nil, err
+		}
+		key, err := mutationPathKey(path)
+		if err != nil {
+			return nil, err
+		}
+		if _, exists := unique[key]; exists {
 			continue
 		}
-		unique[clean] = struct{}{}
-		ordered = append(ordered, clean)
+		unique[key] = struct{}{}
+		ordered = append(ordered, key)
 	}
 	sort.Strings(ordered)
 
 	releases := make([]func(), 0, len(ordered))
 	for _, path := range ordered {
-		release, err := acquireMutationPath(ctx, path)
+		release, err := acquireMutationPathLock(ctx, path)
 		if err != nil {
 			for i := len(releases) - 1; i >= 0; i-- {
 				releases[i]()

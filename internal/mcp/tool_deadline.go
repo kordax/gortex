@@ -45,13 +45,13 @@ const ToolCallTimeoutEnv = "GORTEX_MCP_TOOL_TIMEOUT"
 // the honest answer — the server genuinely cannot serve them.
 const maxAbandonedToolCalls = 64
 
-// abandonedToolCalls counts handlers that outran their budget and are still
-// running detached. Process-wide: the limit is about total leaked work, and a
+// abandonedToolCalls counts handlers whose callers stopped waiting and are
+// still running detached. Process-wide: the limit is about total leaked work, and a
 // wedged store affects every session at once.
 var abandonedToolCalls atomic.Int64
 
-// AbandonedToolCalls reports how many tool handlers outran their deadline and
-// are still running. Non-zero means some subsystem is blocking — it is the
+// AbandonedToolCalls reports how many tool handlers outlived their deadline or
+// caller cancellation and are still running. Non-zero means some subsystem is blocking — it is the
 // signal that distinguishes "this one tool is slow" from "the server is stuck".
 func AbandonedToolCalls() int64 { return abandonedToolCalls.Load() }
 
@@ -113,6 +113,10 @@ func boundHandler[Req, Res any](
 	panicked func(recovered any) (Res, error),
 ) func(context.Context, Req) (Res, error) {
 	return func(ctx context.Context, req Req) (Res, error) {
+		if err := ctx.Err(); err != nil {
+			var zero Res
+			return zero, err
+		}
 		timeout := s.toolCallTimeout()
 		if timeout <= 0 {
 			return h(ctx, req)
@@ -121,11 +125,16 @@ func boundHandler[Req, Res any](
 		// daemon socket's per-request lifetime), so the client receives this
 		// diagnosis rather than the transport's opaque timeout.
 		if deadline, ok := ctx.Deadline(); ok {
-			if remaining := time.Until(deadline) - transportDeadlineMargin; remaining < timeout {
-				timeout = remaining
+			remaining := time.Until(deadline)
+			if remaining <= 0 {
+				var zero Res
+				return zero, context.DeadlineExceeded
 			}
-			if timeout <= 0 {
-				return h(ctx, req)
+			if remaining > transportDeadlineMargin {
+				remaining -= transportDeadlineMargin
+			}
+			if remaining < timeout {
+				timeout = remaining
 			}
 		}
 
@@ -179,18 +188,17 @@ func boundHandler[Req, Res any](
 		case got := <-done:
 			return got.res, got.err
 		case <-callCtx.Done():
-			if ctx.Err() != nil {
-				// The *caller* went away (client cancelled, or the transport's
-				// own request lifetime fired first). Report that, not a
-				// deadline we did not reach.
-				var zero Res
-				return zero, ctx.Err()
-			}
 			stuck := abandonedToolCalls.Add(1)
 			go func() {
 				<-done
 				abandonedToolCalls.Add(-1)
 			}()
+			if ctx.Err() != nil {
+				// Caller cancellation releases the transport, but an unfinished
+				// handler still consumes the same abandoned-work budget.
+				var zero Res
+				return zero, ctx.Err()
+			}
 			if s != nil && s.logger != nil {
 				s.logger.Warn("mcp: request exceeded its deadline; abandoning to keep the session alive",
 					zap.String("kind", kind),
@@ -262,6 +270,25 @@ func abandonedMessage(what, name string, timeout time.Duration) string {
 // states are reported separately and the JSON tail is machine-readable.
 func abandonedToolMessage(name string, timeout time.Duration, verdict mutationCommitVerdict) string {
 	base := abandonedMessage("tool", name, timeout)
+	if len(verdict.Batches) != 0 {
+		switch verdict.Status {
+		case mutationDiskCommitted:
+			base = fmt.Sprintf("tool %q exceeded its %s deadline, but confirmed filesystem changes WERE COMMITTED. "+
+				"Do not repeat this edit. Inspect each batch's disk_status and graph_status below; "+
+				"use its status_request with the edit tool to check the existing transaction.", name, timeout)
+		case mutationDiskInFlight:
+			base = fmt.Sprintf("tool %q exceeded its %s deadline while an atomic batch was unfinished. "+
+				"Its outcome is still unknown; do not repeat the edit or apply it by another route. "+
+				"Use each status_request below with the edit tool to check the existing transaction.", name, timeout)
+		case mutationDiskNotApplied:
+			base = fmt.Sprintf("tool %q exceeded its %s deadline; the observed batch receipts report unchanged or rolled-back files. "+
+				"Use each status_request below with the edit tool to inspect the terminal result before retrying.", name, timeout)
+		}
+		if encoded, err := json.Marshal(verdict); err == nil {
+			base += "\nmutation_commit=" + string(encoded)
+		}
+		return base
+	}
 	switch verdict.Status {
 	case "":
 		// No mutating handler registered a commit, so nothing was written by

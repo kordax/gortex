@@ -118,13 +118,19 @@ func TestAbandonedToolCallsDrainWhenHandlerFinishes(t *testing.T) {
 func TestCallerCancellationIsReportedAsCancellation(t *testing.T) {
 	srv, _ := setupTestServer(t)
 	srv.ToolCallTimeout = 10 * time.Second
+	require.Eventually(t, func() bool { return AbandonedToolCalls() == 0 }, time.Second, time.Millisecond)
 
 	release := make(chan struct{})
-	defer close(release)
+	t.Cleanup(func() {
+		close(release)
+		assert.Eventually(t, func() bool { return AbandonedToolCalls() == 0 }, time.Second, time.Millisecond,
+			"cancelled handlers must release the abandoned-work budget when they finish")
+	})
 	entered := make(chan struct{}, 1)
 	registerBlockingTool(srv, "test_blocks_forever", release, entered)
 
 	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 	go func() {
 		<-entered
 		cancel()
@@ -136,6 +142,7 @@ func TestCallerCancellationIsReportedAsCancellation(t *testing.T) {
 		Params: mcplib.CallToolParams{Name: "test_blocks_forever"},
 	})
 	require.ErrorIs(t, err, context.Canceled)
+	assert.EqualValues(t, 1, AbandonedToolCalls(), "caller cancellation must account for the unfinished handler")
 }
 
 // TestToolDeadlineFiresInsideTheTransportBudget: when the transport already
@@ -159,6 +166,74 @@ func TestToolDeadlineFiresInsideTheTransportBudget(t *testing.T) {
 	require.NotNil(t, res, "the handler bound must answer before the transport deadline")
 	assert.True(t, res.IsError)
 	assert.Contains(t, toolText(res), "deadline")
+}
+
+func TestShortInheritedDeadlineStillBoundsBlockedHandler(t *testing.T) {
+	srv, _ := setupTestServer(t)
+	srv.ToolCallTimeout = time.Hour
+	require.Eventually(t, func() bool { return AbandonedToolCalls() == 0 }, time.Second, time.Millisecond)
+
+	release := make(chan struct{})
+	t.Cleanup(func() {
+		close(release)
+		assert.Eventually(t, func() bool { return AbandonedToolCalls() == 0 }, time.Second, time.Millisecond)
+	})
+	entered := make(chan struct{}, 1)
+	registerBlockingTool(srv, "test_short_deadline", release, entered)
+	tool := srv.MCPServer().GetTool("test_short_deadline")
+	require.NotNil(t, tool)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		_, err := tool.Handler(ctx, mcplib.CallToolRequest{
+			Params: mcplib.CallToolParams{Name: "test_short_deadline"},
+		})
+		done <- err
+	}()
+	select {
+	case <-entered:
+	case <-time.After(time.Second):
+		t.Fatal("handler did not start")
+	}
+	select {
+	case err := <-done:
+		require.ErrorIs(t, err, context.DeadlineExceeded)
+	case <-time.After(2 * time.Second):
+		t.Fatal("short inherited deadline must release the caller while the handler remains blocked")
+	}
+	assert.EqualValues(t, 1, AbandonedToolCalls())
+}
+
+func TestBoundHandlerDoesNotStartCanceledRequests(t *testing.T) {
+	srv, _ := setupTestServer(t)
+	for _, expired := range []bool{false, true} {
+		name := "cancelled"
+		if expired {
+			name = "deadline"
+		}
+		t.Run(name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			want := context.Canceled
+			if expired {
+				cancel()
+				ctx, cancel = context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+				want = context.DeadlineExceeded
+			} else {
+				cancel()
+			}
+			defer cancel()
+			called := false
+			handler := srv.boundToolHandler(func(context.Context, mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+				called = true
+				return mcplib.NewToolResultText("unexpected"), nil
+			})
+			_, err := handler(ctx, mcplib.CallToolRequest{})
+			assert.ErrorIs(t, err, want)
+			assert.False(t, called, "an already cancelled request must not launch work")
+		})
+	}
 }
 
 // TestToolDeadlineDisabled keeps the escape hatch honest for operators running

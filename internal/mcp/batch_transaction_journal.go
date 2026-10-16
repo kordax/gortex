@@ -186,6 +186,7 @@ func (s *Server) prepareBatchJournal(receipt *batchTransactionReceipt, buffers m
 		file := batchTransactionFile{
 			Path: path, RelativePath: buffer.relPath, Mode: buffer.mode,
 			BeforeAbsent: !existsBefore, AfterAbsent: !existsAfter,
+			BeforeSymlinkTarget: buffer.beforeSymlinkTarget,
 		}
 		if existsBefore {
 			backupName := fmt.Sprintf("before-%04d.bin", i)
@@ -228,7 +229,7 @@ func readBatchBackup(receipt batchTransactionReceipt, file batchTransactionFile)
 
 func classifyBatchFiles(files []batchTransactionFile) (before, after, unknown []batchTransactionFile, err error) {
 	for _, file := range files {
-		content, readErr := os.ReadFile(file.Path)
+		info, readErr := os.Lstat(file.Path)
 		if errors.Is(readErr, os.ErrNotExist) {
 			switch {
 			case file.BeforeAbsent:
@@ -250,11 +251,33 @@ func classifyBatchFiles(files []batchTransactionFile) (before, after, unknown []
 			}
 			continue
 		}
+		isSymlink := info.Mode()&os.ModeSymlink != 0
+		if isSymlink {
+			target, linkErr := os.Readlink(file.Path)
+			if linkErr != nil || file.BeforeSymlinkTarget == "" || target != file.BeforeSymlinkTarget {
+				unknown = append(unknown, file)
+				if err == nil {
+					err = fmt.Errorf("%s has an unexpected symlink entry", file.RelativePath)
+				}
+				continue
+			}
+		}
+		readInfo, content, contentErr := batchPathBytes(file.Path, file.RelativePath)
+		if contentErr == nil && (readInfo == nil || !os.SameFile(info, readInfo)) {
+			contentErr = fmt.Errorf("%s changed directory entry while reading transaction state", file.RelativePath)
+		}
+		if contentErr != nil {
+			unknown = append(unknown, file)
+			if err == nil {
+				err = contentErr
+			}
+			continue
+		}
 		digest := digestBatchBytes(content)
 		switch {
-		case !file.BeforeAbsent && digest == file.BeforeSHA256:
+		case !file.BeforeAbsent && isSymlink == (file.BeforeSymlinkTarget != "") && digest == file.BeforeSHA256:
 			before = append(before, file)
-		case !file.AfterAbsent && digest == file.AfterSHA256:
+		case !file.AfterAbsent && !isSymlink && digest == file.AfterSHA256:
 			after = append(after, file)
 		default:
 			unknown = append(unknown, file)
@@ -282,7 +305,11 @@ func (s *Server) rollbackBatchReceipt(receipt batchTransactionReceipt) (string, 
 		if err != nil {
 			return "recovery_conflict", fmt.Errorf("load rollback backup for %s: %w", file.RelativePath, err)
 		}
-		if err := s.batchDurability().writeFile(file.Path, backup, file.Mode); err != nil {
+		if file.BeforeSymlinkTarget != "" {
+			if err := durableAtomicRestoreSymlink(file.Path, file.BeforeSymlinkTarget); err != nil {
+				return "recovery_conflict", fmt.Errorf("restore symlink %s: %w", file.RelativePath, err)
+			}
+		} else if err := s.batchDurability().writeFile(file.Path, backup, file.Mode); err != nil {
 			return "recovery_conflict", fmt.Errorf("restore %s: %w", file.RelativePath, err)
 		}
 	}

@@ -412,6 +412,7 @@ func (l *mutationCommitLedger) recent(limit int) []*mutationCommitRecord {
 type mutationCommitNote struct {
 	mu      sync.Mutex
 	records []*mutationCommitRecord
+	batches []*batchTransactionState
 }
 
 type mutationCommitNoteKey struct{}
@@ -435,13 +436,63 @@ func (n *mutationCommitNote) observe(record *mutationCommitRecord) {
 	n.records = append(n.records, record)
 }
 
+// observeBatch retains the existing ledger state so a deadline can report the
+// latest disk outcome without creating a second commit record.
+func (n *mutationCommitNote) observeBatch(state *batchTransactionState) {
+	if n == nil || state == nil {
+		return
+	}
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	for _, existing := range n.batches {
+		if existing == state {
+			return
+		}
+	}
+	n.batches = append(n.batches, state)
+}
+
 // mutationCommitVerdict is what the deadline wrapper reports. It is read at
 // abandon time from a handler that is still running, so it is deliberately
 // conservative: anything short of a confirmed terminal state reads as unknown.
 type mutationCommitVerdict struct {
-	// Status is one of "", "not_applied", "unknown", or "committed".
-	Status    string                   `json:"disk_status"`
-	Snapshots []mutationCommitSnapshot `json:"mutations,omitempty"`
+	// Status is one of "", "not_applied", "in_flight", or "committed".
+	Status    string                        `json:"disk_status"`
+	Snapshots []mutationCommitSnapshot      `json:"mutations,omitempty"`
+	Batches   []batchMutationCommitSnapshot `json:"batches,omitempty"`
+}
+
+// batchMutationCommitSnapshot preserves separate disk and graph outcomes and
+// a facade status request, including generated transaction IDs and the view.
+type batchMutationCommitSnapshot struct {
+	TransactionID       string         `json:"transaction_id"`
+	Status              string         `json:"status"`
+	DiskStatus          string         `json:"disk_status"`
+	GraphStatus         string         `json:"graph_status"`
+	CheckoutID          string         `json:"checkout_id,omitempty"`
+	CheckoutIncarnation string         `json:"checkout_incarnation,omitempty"`
+	Error               string         `json:"error,omitempty"`
+	StatusRequest       map[string]any `json:"status_request"`
+}
+
+func snapshotBatchMutationCommit(state *batchTransactionState) batchMutationCommitSnapshot {
+	receipt := state.snapshot()
+	request := map[string]any{
+		"operation": "batch",
+		"options": map[string]any{
+			"transaction_id": receipt.TransactionID,
+			"status_only":    true,
+		},
+	}
+	if receipt.CheckoutID != "" {
+		request["view"] = map[string]any{"kind": "worktree", "checkout_id": receipt.CheckoutID}
+	}
+	return batchMutationCommitSnapshot{
+		TransactionID: receipt.TransactionID, Status: receipt.Status,
+		DiskStatus: receipt.DiskStatus, GraphStatus: receipt.GraphStatus,
+		CheckoutID: receipt.CheckoutID, CheckoutIncarnation: receipt.CheckoutIncarnation,
+		Error: receipt.Error, StatusRequest: request,
+	}
 }
 
 func (n *mutationCommitNote) verdict() mutationCommitVerdict {
@@ -450,15 +501,14 @@ func (n *mutationCommitNote) verdict() mutationCommitVerdict {
 	}
 	n.mu.Lock()
 	records := append([]*mutationCommitRecord(nil), n.records...)
+	batches := append([]*batchTransactionState(nil), n.batches...)
 	n.mu.Unlock()
-	if len(records) == 0 {
+	if len(records) == 0 && len(batches) == 0 {
 		return mutationCommitVerdict{}
 	}
 	verdict := mutationCommitVerdict{Status: mutationDiskNotApplied}
-	for _, record := range records {
-		snap := record.snapshot()
-		verdict.Snapshots = append(verdict.Snapshots, snap)
-		switch snap.DiskStatus {
+	mergeStatus := func(status string) {
+		switch status {
 		case mutationDiskCommitted:
 			verdict.Status = mutationDiskCommitted
 		case mutationDiskInFlight:
@@ -466,6 +516,23 @@ func (n *mutationCommitNote) verdict() mutationCommitVerdict {
 				verdict.Status = mutationDiskInFlight
 			}
 		}
+	}
+	for _, record := range records {
+		snap := record.snapshot()
+		verdict.Snapshots = append(verdict.Snapshots, snap)
+		mergeStatus(snap.DiskStatus)
+	}
+	for _, state := range batches {
+		snap := snapshotBatchMutationCommit(state)
+		verdict.Batches = append(verdict.Batches, snap)
+		status := mutationDiskInFlight
+		switch {
+		case snap.Status == "committed" && snap.DiskStatus == "committed":
+			status = mutationDiskCommitted
+		case snap.Status == "aborted" && (snap.DiskStatus == "unchanged" || snap.DiskStatus == "rolled_back"):
+			status = mutationDiskNotApplied
+		}
+		mergeStatus(status)
 	}
 	return verdict
 }
