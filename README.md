@@ -1,3 +1,5 @@
+> **Gortex · fork by kordax.** This fork has independent versions and updates at [kordax/gortex](https://github.com/kordax/gortex/releases). Start with [fork installation and release verification](docs/fork-release.md). Upstream project: [zzet/gortex](https://github.com/zzet/gortex).
+
 <div align="center">
 <p align="center">
   <img src="assets/wall.svg" alt="Gortex" width="500">
@@ -9,11 +11,9 @@
 #### Single static binary for macOS, Linux, and Windows — no dependency chain, simple installation and use.
 
 ---
-[![CI](https://github.com/zzet/gortex/actions/workflows/ci.yml/badge.svg)](https://github.com/zzet/gortex/actions/workflows/ci.yml)
-[![Latest release](https://img.shields.io/github/v/release/zzet/gortex?logo=github&sort=semver)](https://github.com/zzet/gortex/releases/latest)
-[![Sigstore signed](https://img.shields.io/badge/sigstore-signed-66D4FF?logo=sigstore&logoColor=white)](docs/installation.md#verifying-releases-supply-chain-security)
-[![SLSA 3](https://img.shields.io/badge/SLSA-Level%203-green)](https://slsa.dev/spec/v1.0/levels#build-l3)
-[![VirusTotal](https://img.shields.io/badge/VirusTotal-0%2F91-brightgreen?logo=virustotal)](https://www.virustotal.com/gui/url/00e1094b39c9bd7db4d5a179b1d56173f85c915075057fd3cc64bfbb9b735b11/detection)
+[![CI](https://github.com/kordax/gortex/actions/workflows/ci.yml/badge.svg)](https://github.com/kordax/gortex/actions/workflows/ci.yml)
+[![Latest release](https://img.shields.io/github/v/release/kordax/gortex?logo=github&sort=semver)](https://github.com/kordax/gortex/releases/latest)
+[![Sigstore verification](https://img.shields.io/badge/sigstore-verification-66D4FF?logo=sigstore&logoColor=white)](docs/fork-release.md#future-automated-releases)
 [![macOS](https://img.shields.io/badge/macOS-supported-blue.svg)](#)
 [![Linux](https://img.shields.io/badge/Linux-supported-blue.svg)](#)
 [![Windows](https://img.shields.io/badge/Windows-supported-blue.svg)](#)
@@ -65,15 +65,19 @@ Full catalog of features: [docs/features.md](docs/features.md). Complete CLI ref
 
 ## Install
 
-```bash
-# macOS / Linux
-curl -fsSL https://get.gortex.dev | sh
+`v1.0.0` is a manual **Linux amd64** release, built and checked locally, with an archive and SHA-256 manifest. It has no cosign signatures, SLSA provenance or macOS/Windows/arm64 packages. GitHub CI runs in the background; this release does not claim completed GitHub platform checks.
 
-# Windows (PowerShell)
-irm https://get.gortex.dev/install.ps1 | iex
+```bash
+# Build and install this checkout into ~/.local/bin.
+bash scripts/install-local.sh
+
+# Or install a trusted release binary after downloading and checking its SHA-256.
+bash scripts/install-local.sh --binary /path/to/verified/gortex
 ```
 
-Detects OS/arch, verifies SHA256 + cosign, installs to PATH. Re-run to upgrade. Homebrew, `.deb` / `.rpm` / `.apk`, scoop, signed binaries, and from-source builds: [docs/installation.md](docs/installation.md).
+Follow [the v1.0.0 download and verification instructions](docs/fork-release.md#install-v100) before using `--binary`. Both paths preserve a previous binary and leave configuration and the running daemon alone. The guide also covers machine-wide installation and explicit daemon activation.
+
+The remote installer keeps its cosign checks and refuses this unsigned manual release when cosign is installed; use the trusted-binary path instead of bypassing verification. Future automated releases retain mandatory CI/security gates, signed platform assets and provenance. Installers and updates target [this fork](https://github.com/kordax/gortex/releases), rather than upstream Homebrew, Scoop or `get.gortex.dev`.
 
 ## Quick Start
 

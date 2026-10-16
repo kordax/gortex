@@ -53,6 +53,12 @@ jobs:
         if: matrix.os == 'windows-latest'
         run: go test -v -timeout=45m ./...
 
+      - name: Test fork installers without network or daemon changes
+        if: runner.os == 'Linux'
+        run: |
+          bash scripts/test-install-local.sh
+          bash scripts/test-install-release.sh
+
       - name: Upload coverage
         if: matrix.os == 'ubuntu-latest' && matrix.go-version == '1.27'
         uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
@@ -122,7 +128,7 @@ jobs:
       - name: golangci-lint
         uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9
         with:
-          version: v2.13.1
+          version: v2.15.0
           args: --timeout=10m
 
       # goreleaser used to run `go mod tidy` as a release before-hook, which

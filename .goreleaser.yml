@@ -1,5 +1,20 @@
 version: 2
 
+project_name: gortex
+
+# Keep partially assembled multi-platform releases out of the latest endpoint.
+release:
+  github:
+    owner: kordax
+    name: gortex
+  draft: true
+  name_template: "Gortex {{ .Version }} · fork by kordax"
+  header: |
+    Independent kordax/gortex release. Source, installers and updates come from this fork.
+    macOS assets use ad-hoc signing unless this fork supplies Apple Developer ID credentials;
+    Apple notarization is not implied by the cosign signatures.
+    Installation and release verification: https://github.com/kordax/gortex/blob/main/docs/fork-release.md
+
 # Run inside ghcr.io/goreleaser/goreleaser-cross — the Docker image ships
 # cross-compile toolchains so CGO (tree-sitter) links cleanly on a single
 # Linux runner. This config builds the LINUX targets + their deb/rpm/apk
@@ -135,9 +150,9 @@ nfpms:
       - deb
       - rpm
       - apk
-    vendor: "zzet"
-    homepage: "https://github.com/zzet/gortex"
-    maintainer: "zzet"
+    vendor: "kordax"
+    homepage: "https://github.com/kordax/gortex"
+    maintainer: "kordax"
     description: "Code intelligence engine that indexes repositories into a knowledge graph."
     license: "Custom"
 

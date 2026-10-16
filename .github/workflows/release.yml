@@ -12,7 +12,33 @@ permissions:
   #   2. SLSA-3 provenance generation (the reusable workflow below also sets it)
   id-token: write
 
+# Apple Developer ID material is optional for this fork. Without it the
+# native macOS binaries are ad-hoc signed and explicitly not notarized.
+env:
+  MACOS_SIGNING_ENABLED: ${{ secrets.MACOS_CERTIFICATE_P12 != '' && secrets.MACOS_CERTIFICATE_PASSWORD != '' }}
+  MACOS_NOTARY_ENABLED: ${{ secrets.MACOS_CERTIFICATE_P12 != '' && secrets.MACOS_CERTIFICATE_PASSWORD != '' && secrets.MACOS_NOTARY_API_KEY != '' && secrets.MACOS_NOTARY_KEY_ID != '' && secrets.MACOS_NOTARY_ISSUER_ID != '' }}
+
 jobs:
+  verify-source:
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - name: Require successful CI and security for this exact commit
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_REPOSITORY" == kordax/gortex ]] || { echo 'This release workflow publishes only kordax/gortex'; exit 1; }
+          [[ "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo 'Expected a stable vX.Y.Z tag'; exit 1; }
+          for workflow in ci.yml security.yml; do
+            gh run list --repo "$GITHUB_REPOSITORY" --workflow "$workflow" --commit "$GITHUB_SHA" \
+              --event push --limit 20 --json conclusion,status > workflow-runs.json
+            jq -e 'any(.[]; .status == "completed" and .conclusion == "success")' workflow-runs.json >/dev/null \
+              || { echo 'Push the release commit to main and wait for CI and security before tagging'; exit 1; }
+          done
+
   # darwin is built on a NATIVE macOS runner so Apple's ld sets the
   # SG_READ_ONLY flag on the __DATA_CONST segment. The cross-compiled cask
   # shipped without it and aborted under the macOS 15+/Tahoe dyld
@@ -23,6 +49,7 @@ jobs:
   # archives in goreleaser's layout, and uploads them for the `release` job to
   # merge, notarize, sign, and reference from the homebrew cask.
   build-darwin:
+    needs: verify-source
     runs-on: macos-15
     # Only reads the repo and hands off an artifact — no release writes here.
     permissions:
@@ -59,6 +86,7 @@ jobs:
             go build -ldflags "$LDFLAGS" -o dist-darwin/gortex_darwin_amd64 ./cmd/gortex/
 
       - name: Stage macOS signing material
+        if: env.MACOS_SIGNING_ENABLED == 'true'
         env:
           P12_B64:  ${{ secrets.MACOS_CERTIFICATE_P12 }}
           P12_PASS: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
@@ -86,10 +114,19 @@ jobs:
           rm "$SIGNING_DIR/$RCODESIGN_TARBALL"
 
       - name: Codesign darwin binaries
+        if: env.MACOS_SIGNING_ENABLED == 'true'
         run: |
           set -euo pipefail
           sh scripts/sign-macos-build-hook.sh darwin dist-darwin/gortex_darwin_arm64
           sh scripts/sign-macos-build-hook.sh darwin dist-darwin/gortex_darwin_amd64
+
+      - name: Ad-hoc sign macOS binaries without Developer ID credentials
+        if: env.MACOS_SIGNING_ENABLED != 'true'
+        run: |
+          set -euo pipefail
+          codesign --force --sign - dist-darwin/gortex_darwin_arm64
+          codesign --force --sign - dist-darwin/gortex_darwin_amd64
+          echo 'macOS assets are ad-hoc signed, without Apple notarization.' >> "$GITHUB_STEP_SUMMARY"
 
       - name: Smoke-test __DATA_CONST SG_READ_ONLY flag (issue #176)
         run: |
@@ -140,6 +177,7 @@ jobs:
       # loaded by Homebrew on Linux, and build-darwin is the only macOS job the
       # release depends on.
       - name: Validate homebrew cask
+        if: github.repository == 'zzet/gortex'
         run: bash scripts/validate-cask.sh
 
       - name: Upload darwin archives
@@ -179,6 +217,7 @@ jobs:
       # notary API key. The dir is wiped unconditionally at the end of the
       # job (see "Wipe macOS signing material").
       - name: Stage macOS notary material
+        if: env.MACOS_NOTARY_ENABLED == 'true'
         env:
           NOTARY_B64: ${{ secrets.MACOS_NOTARY_API_KEY }}
           KEY_ID:     ${{ secrets.MACOS_NOTARY_KEY_ID }}
@@ -301,6 +340,7 @@ jobs:
       # don't pass --staple. Online macs fetch the ticket from Apple on
       # first run; offline-first UX would require a signed .pkg.
       - name: Notarize macOS binaries
+        if: env.MACOS_NOTARY_ENABLED == 'true'
         run: |
           set -euo pipefail
           SIGNING_DIR=/tmp/macos-signing
@@ -378,6 +418,7 @@ jobs:
       - name: Upload signatures to release
         uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3
         with:
+          draft: true
           files: |
             dist/*.sig
             dist/*.pem
@@ -408,6 +449,7 @@ jobs:
       # so nothing needs to run at release time. HOMEBREW_TAP_TOKEN is a PAT
       # with `repo` scope on the tap; GITHUB_TOKEN can only push to this repo.
       - name: Publish homebrew cask
+        if: github.repository == 'zzet/gortex'
         env:
           HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
         run: |
@@ -584,6 +626,7 @@ jobs:
           cat checksums.txt
 
       - name: Publish Scoop manifest
+        if: github.repository == 'zzet/gortex'
         # Push a refreshed `gortex` manifest to gortexhq/scoop-bucket so
         # `scoop install gortex` resolves this release. SCOOP_BUCKET_TOKEN is
         # a PAT with `repo` scope on that bucket (GITHUB_TOKEN can only push
@@ -655,6 +698,8 @@ jobs:
   verify-signatures:
     needs: [release, release-windows]
     runs-on: ubuntu-latest
+    outputs:
+      hashes: ${{ steps.verify.outputs.hashes }}
     permissions:
       contents: read
     steps:
@@ -663,6 +708,7 @@ jobs:
           cosign-release: v2.4.1
 
       - name: Verify every published signature against its published artifact
+        id: verify
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -728,7 +774,17 @@ jobs:
           done
 
           [ "$failed" -eq 0 ] || { echo "release $TAG has unverifiable assets"; exit 1; }
-          echo "all $checked published signatures verify against their artifacts"
+          echo "all $checked draft signatures verify against their artifacts"
+          for artifact in gortex_linux_amd64.tar.gz gortex_linux_arm64.tar.gz \
+                          gortex_darwin_amd64.tar.gz gortex_darwin_arm64.tar.gz gortex_windows_amd64.zip \
+                          gortex_linux_amd64.deb gortex_linux_arm64.deb \
+                          gortex_linux_amd64.rpm gortex_linux_arm64.rpm \
+                          gortex_linux_amd64.apk gortex_linux_arm64.apk; do
+            [ -s "$artifact" ] || { echo "Missing required release artifact: $artifact"; exit 1; }
+          done
+          sha256sum --check checksums.txt
+          HASHES=$(sha256sum *.tar.gz *.zip *.deb *.rpm *.apk | base64 -w0)
+          echo "hashes=$HASHES" >> "$GITHUB_OUTPUT"
 
   # SLSA-3 provenance via the OpenSSF reusable workflow. This runs in a
   # separate, isolated job that the `release` job can't tamper with —
@@ -736,7 +792,7 @@ jobs:
   # a `multiple.intoto.jsonl` file attached to the release that
   # consumers verify with https://github.com/slsa-framework/slsa-verifier.
   provenance:
-    needs: release
+    needs: verify-signatures
     permissions:
       actions: read
       id-token: write
@@ -747,15 +803,29 @@ jobs:
     # exempts slsa-framework reusable workflows from the SHA-pin rule.
     uses: slsa-framework/slsa-github-generator/.github/workflows/generator_generic_slsa3.yml@v2.1.0
     with:
-      base64-subjects: ${{ needs.release.outputs.hashes }}
+      base64-subjects: ${{ needs.verify-signatures.outputs.hashes }}
       upload-assets: true
+      draft-release: 'true'
 
   # VirusTotal scan each primary artifact against ~72 AV engines and
   # append a results badge to the release notes. Needs a VT_API_KEY
   # repo secret (free tier, 500 requests/day). Non-blocking — VT
   # outages shouldn't fail a release.
+  publish:
+    needs: [verify-signatures, provenance]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Publish the fully verified draft
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          gh release edit "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --draft=false --latest
+
   virustotal:
-    needs: release
+    needs: publish
     runs-on: ubuntu-latest
     continue-on-error: true
     steps:
