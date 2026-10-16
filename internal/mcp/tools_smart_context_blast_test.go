@@ -23,18 +23,19 @@ func TestSmartContext_BlastRadiusAlwaysPresent(t *testing.T) {
 	assert.True(t, hasTests, "blast_radius must carry covering_tests")
 }
 
-// TestSmartContext_BlastRadiusNoTestsWarning verifies that when no
-// working-set symbol has a covering test the block carries the warning.
-func TestSmartContext_BlastRadiusNoTestsWarning(t *testing.T) {
+// TestSmartContext_BlastRadiusUnknownTestEvidence verifies that a fixture
+// without indexed test symbols cannot establish a missing-test finding.
+func TestSmartContext_BlastRadiusUnknownTestEvidence(t *testing.T) {
 	srv, _ := setupCompressTestServer(t)
 	m := extractTextResult(t, callTool(t, srv, "smart_context", map[string]any{
 		"task": "validate token and parse claims",
 	}))
 	br, _ := m["blast_radius"].(map[string]any)
 	require.NotNil(t, br)
-	// The single-file fixture ships no tests, so the warning must fire.
-	assert.Equal(t, "no covering tests found", br["warning"],
-		"a working set with no EdgeTests coverage must warn")
+	// The graph cannot distinguish absent tests from excluded test files.
+	assert.Equal(t, false, br["coverage_known"])
+	assert.Equal(t, testIndexUnavailableNote, br["warning"])
+	assert.Empty(t, br["covering_tests"])
 }
 
 // TestSmartContext_BlastRadiusStable verifies the blast-radius block

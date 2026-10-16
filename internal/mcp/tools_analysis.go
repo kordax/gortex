@@ -513,6 +513,18 @@ func (s *Server) handleEnhancedChangeImpact(ctx context.Context, req mcp.CallToo
 		"cross_repo_impact":    impact.CrossRepoImpact,
 	}
 
+	var evidenceNodes []*graph.Node
+	for _, id := range ids {
+		evidenceNodes = append(evidenceNodes, s.engineFor(ctx).GetSymbol(id))
+	}
+	coverageKnown := s.testEvidenceKnownForNodes(ctx, evidenceNodes)
+	result["coverage_known"] = coverageKnown
+	if !coverageKnown {
+		result["coverage_note"] = testIndexUnavailableNote
+	} else {
+		result["coverage_note"] = "test_files lists observed graph test links, not measured runtime coverage"
+	}
+
 	// GNX-3: by_depth_counts is the headline; the heavy by_depth rows are
 	// paged (offset / limit) or dropped (summary_only) so the agent gets the
 	// "47 affected, 3 at depth-1" summary by default and the rows on demand.

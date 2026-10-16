@@ -102,8 +102,10 @@ func (s *Server) buildEditStrategy(ctx context.Context, p *prediction) *editStra
 	var safety []string
 	if p.impact != nil && len(p.impact.TestFiles) > 0 {
 		safety = append(safety, fmt.Sprintf("%d covering test file(s) exercise the changed set", len(p.impact.TestFiles)))
+	} else if !s.testEvidenceKnownForNodes(ctx, p.nodes) {
+		safety = append(safety, testIndexUnavailableNote)
 	} else {
-		safety = append(safety, "no covering tests found — add one before refactoring")
+		safety = append(safety, "no covering tests found in the indexed graph — verify the test suite before refactoring")
 	}
 	safety = append(safety, fmt.Sprintf("%d caller(s) are graph-tracked; use rename_symbol / change_contract source=edit to verify them", callers))
 	if p.step != nil && len(p.step.brokenCallers) == 0 {

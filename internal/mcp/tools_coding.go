@@ -1602,12 +1602,24 @@ func (s *Server) handleGetTestTargets(ctx context.Context, req mcp.CallToolReque
 		}
 	}
 
-	// Uncovered symbols (no test found).
-	var uncovered []string
+	// Absence of graph edges is meaningful only when test symbols for the
+	// same repository and language were indexed. Excluded tests and unknown
+	// symbol IDs must not become claims of missing tests.
+	var uncovered, coverageUnknown []string
 	for _, id := range ids {
-		if !coveredSymbols[id] {
-			uncovered = append(uncovered, id)
+		if coveredSymbols[id] {
+			continue
 		}
+		if !s.testEvidenceKnown(ctx, s.engineFor(ctx).GetSymbol(id)) {
+			coverageUnknown = append(coverageUnknown, id)
+			continue
+		}
+		uncovered = append(uncovered, id)
+	}
+	coverageKnown := len(coverageUnknown) == 0
+	coverageNote := fmt.Sprintf("%d/%d changed symbols have indexed test coverage", len(coveredSymbols), len(ids))
+	if !coverageKnown {
+		coverageNote = testIndexUnavailableNote
 	}
 
 	// Compact text for callers that paste this into a prompt or a hook
@@ -1617,7 +1629,9 @@ func (s *Server) handleGetTestTargets(ctx context.Context, req mcp.CallToolReque
 		var b strings.Builder
 		// Sentinel first, so a caller can recognize "nothing covers this"
 		// from the leading line rather than having to scan to the end.
-		if len(targets) == 0 {
+		if !coverageKnown {
+			fmt.Fprintln(&b, coverageNote)
+		} else if len(targets) == 0 {
 			b.WriteString("no test targets found\n")
 		}
 		for _, t := range targets {
@@ -1637,11 +1651,13 @@ func (s *Server) handleGetTestTargets(ctx context.Context, req mcp.CallToolReque
 	}
 
 	return s.respondJSONOrTOON(ctx, req, map[string]any{
-		"test_targets":  targets,
-		"run_commands":  runCommands,
-		"total_files":   len(targets),
-		"uncovered":     uncovered,
-		"coverage_note": fmt.Sprintf("%d/%d changed symbols have test coverage", len(coveredSymbols), len(ids)),
+		"test_targets":     targets,
+		"run_commands":     runCommands,
+		"total_files":      len(targets),
+		"uncovered":        uncovered,
+		"coverage_unknown": coverageUnknown,
+		"coverage_known":   coverageKnown,
+		"coverage_note":    coverageNote,
 	})
 }
 
@@ -2584,8 +2600,12 @@ func (s *Server) buildBlastRadius(ctx context.Context, workingSet []*graph.Node)
 		"callers_by_file": callerGroups,
 		"covering_tests":  coveringTests,
 	}
-	if !anyTesters {
-		br["warning"] = "no covering tests found"
+	coverageKnown := s.testEvidenceKnownForNodes(ctx, workingSet)
+	br["coverage_known"] = coverageKnown
+	if !coverageKnown {
+		br["warning"] = testIndexUnavailableNote
+	} else if !anyTesters {
+		br["warning"] = "no covering tests found in the indexed graph"
 	}
 	return br
 }

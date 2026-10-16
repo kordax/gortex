@@ -146,13 +146,6 @@ type toonSubGraphResult struct {
 	UsageSummary          *query.UsageSummary `toon:"usage_summary,omitempty"`
 }
 
-// toonSearchResult wraps search results for TOON tabular output.
-type toonSearchResult struct {
-	Results   []toonNodeRow `toon:"results"`
-	Total     int           `toon:"total"`
-	Truncated bool          `toon:"truncated"`
-}
-
 // nodesToTOONRows converts graph nodes to flat TOON rows.
 func nodesToTOONRows(nodes []*graph.Node) []toonNodeRow {
 	rows := make([]toonNodeRow, 0, len(nodes))
@@ -2279,41 +2272,15 @@ func (s *Server) handleSearchSymbols(ctx context.Context, req mcp.CallToolReques
 		offset = total
 	}
 	page := nodes[offset:end]
-	// Record only the actual post-cursor page. Empty and out-of-range pages
-	// deliberately clear any prior attribution state.
-	recordLastSearchFromNodes(sess, q, page)
 	// Decorate the page with absolute file paths so every output format
 	// below surfaces an openable path alongside the repo-relative one.
 	page = s.withAbsPaths(ctx, page)
-	// Capture the final ranked, scoped page once, before JSON/TOON/GCX encoding.
-	captureLocalizationSearchSymbols(ctx, page)
 	nextCursor := ""
 	if end < total {
 		nextCursor = encodeCursor(end)
 	}
 
 	indexWarning := s.indexFileFailureWarning(ctx, resolved, pathFilter)
-	if isCompact(req) {
-		return decorateResultWithScope(decorateIndexFileFailureResult(mcp.NewToolResultText(compactNodes(page)), indexWarning), resolved), nil
-	}
-
-	if s.isGCX(ctx, req) {
-		res, err := s.gcxResponseWithBudget(req)(encodeSearchSymbols(page, total, len(page)))
-		return withScopeResult(decorateIndexFileFailureResult(res, indexWarning), err, resolved)
-	}
-
-	if s.isTOON(ctx, req) {
-		result := toonSearchResult{
-			Results:   nodesToTOONRows(page),
-			Total:     total,
-			Truncated: end < total,
-		}
-		data, err := toon.Marshal(result)
-		if err == nil {
-			return decorateResultWithScope(decorateIndexFileFailureResult(mcp.NewToolResultText(string(data)), indexWarning), resolved), nil
-		}
-	}
-
 	var results []map[string]any
 	for _, n := range page {
 		results = append(results, n.Brief())
@@ -2480,7 +2447,15 @@ func (s *Server) handleSearchSymbols(ctx context.Context, req mcp.CallToolReques
 		)
 	}
 
-	return s.respondScopedJSONOrTOON(ctx, req, resp, resolved)
+	rendered, err := s.renderSearchSymbols(ctx, req, page, offset, total, resp, resolved)
+	if err == nil && rendered.result != nil && !rendered.result.IsError {
+		// Budgeting may emit only a prefix. Attribute consumption and finish
+		// localization using exactly that visible page, once rendering succeeds.
+		// An empty page also clears the previous search's attribution state.
+		recordLastSearchFromNodes(sess, q, rendered.nodes)
+		captureLocalizationSearchSymbols(ctx, rendered.nodes)
+	}
+	return rendered.result, err
 }
 
 // encodeRerankBreakdown converts a candidate slice into a JSON-ready

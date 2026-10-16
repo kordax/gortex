@@ -52,7 +52,7 @@ func (s *Server) handleGetUntestedSymbols(ctx context.Context, req mcp.CallToolR
 	}
 
 	var entries []untestedEntry
-	totalCandidates := 0
+	totalCandidates, totalUnknown, uncoveredCandidates := 0, 0, 0
 	scoped := s.scopedNodesByKinds(ctx, []graph.NodeKind{graph.KindFunction, graph.KindMethod})
 	for _, n := range scoped {
 		// Skip symbols defined inside test files — those ARE test code.
@@ -66,6 +66,11 @@ func (s *Server) handleGetUntestedSymbols(ctx context.Context, req mcp.CallToolR
 		if covered[n.ID] {
 			continue
 		}
+		if !s.testEvidenceKnown(ctx, n) {
+			totalUnknown++
+			continue
+		}
+		uncoveredCandidates++
 		fi := fanIn[n.ID]
 		if fi < minFanIn {
 			continue
@@ -95,15 +100,24 @@ func (s *Server) handleGetUntestedSymbols(ctx context.Context, req mcp.CallToolR
 		entries = entries[:limit]
 	}
 
-	var coverageRatio float64
-	if totalCandidates > 0 {
-		coverageRatio = float64(totalCandidates-totalUncovered) / float64(totalCandidates)
+	// A missing test corpus cannot produce a numeric coverage estimate.
+	// Known ratios describe graph reachability, not measured runtime coverage.
+	var coverageRatio any
+	coverageKnown := totalCandidates > 0 && totalUnknown == 0
+	coverageNote := "graph test reachability; not measured runtime coverage"
+	if coverageKnown {
+		coverageRatio = float64(totalCandidates-uncoveredCandidates) / float64(totalCandidates)
+	} else {
+		coverageNote = testIndexUnavailableNote
 	}
 
 	return s.respondJSONOrTOON(ctx, req, map[string]any{
 		"untested":         entries,
 		"total_candidates": totalCandidates,
 		"total_uncovered":  totalUncovered,
+		"total_unknown":    totalUnknown,
+		"coverage_known":   coverageKnown,
+		"coverage_note":    coverageNote,
 		"coverage_ratio":   coverageRatio,
 		"truncated":        totalUncovered > len(entries),
 	})

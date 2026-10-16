@@ -365,16 +365,32 @@ func formatAxisWeights(m map[string]float64) string {
 // encodeSearchSymbols emits one row per search hit with the minimum
 // fields an agent needs to decide whether to fetch more detail.
 func encodeSearchSymbols(nodes []*graph.Node, total, limit int) ([]byte, error) {
+	return encodeSearchSymbolsWithMetadata(nodes, total, limit, nil)
+}
+
+func encodeSearchSymbolsWithMetadata(nodes []*graph.Node, total, limit int, metadata map[string]any) ([]byte, error) {
 	truncated := total > limit
+	if value, ok := metadata["truncated"].(bool); ok {
+		truncated = value
+	}
 	if len(nodes) > limit {
 		nodes = nodes[:limit]
 	}
+	header, comments, err := searchSymbolsGCXMetadata(metadata)
+	if err != nil {
+		return nil, err
+	}
+	header = append([]string{"total", fmt.Sprintf("%d", total), "truncated", boolString(truncated)}, header...)
 	var buf bytes.Buffer
 	enc := newGCX(&buf, "search_symbols",
 		[]string{"id", "kind", "name", "path", "path_abs", "line", "sig", "enclosing", "is_test", "test_role", "test_runner", "type_flavor", "ui_component"},
-		"total", fmt.Sprintf("%d", total),
-		"truncated", boolString(truncated),
+		header...,
 	)
+	for _, comment := range comments {
+		if err := enc.WriteComment(comment); err != nil {
+			return nil, err
+		}
+	}
 	if err := enc.WriteComment(fmt.Sprintf("%d result(s)", len(nodes))); err != nil {
 		return nil, err
 	}
@@ -1956,6 +1972,17 @@ func encodeChangeImpact(result map[string]any) ([]byte, error) {
 	}
 	if err := sumEnc.Close(); err != nil {
 		return nil, err
+	}
+
+	if known, ok := result["coverage_known"].(bool); ok {
+		note, _ := result["coverage_note"].(string)
+		evidenceEnc := newGCX(&buf, "explain_change_impact.test_evidence", []string{"coverage_known", "note"})
+		if err := evidenceEnc.WriteRow(boolString(known), note); err != nil {
+			return nil, err
+		}
+		if err := evidenceEnc.Close(); err != nil {
+			return nil, err
+		}
 	}
 
 	// Flatten by_depth (and by_repo when cross-repo) into a single
