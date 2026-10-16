@@ -329,7 +329,9 @@ func TestSimilarToObservesCompleteCorpusDuringReplacement(t *testing.T) {
 		}
 		if _, err := store.ReplaceVectorCorpus(ctx, "repo", 2, items); err != nil {
 			close(stop)
-			<-errCh
+			if readErr := <-errCh; readErr != nil {
+				t.Errorf("concurrent vector read: %v", readErr)
+			}
 			t.Fatal(err)
 		}
 	}

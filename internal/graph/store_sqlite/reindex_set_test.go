@@ -358,7 +358,8 @@ func TestReindexEdgesProbesVariableLimitBeforeWriterCheckout(t *testing.T) {
 		// probing its limit unwind, so test cleanup cannot remain wedged.
 		store.writerDB.SetMaxOpenConns(2)
 		select {
-		case <-done:
+		case err := <-done:
+			assert.NoError(t, err, "reindex after releasing writer connection")
 		case <-time.After(5 * time.Second):
 		}
 		t.Fatal("ReindexEdges waited for its own writer connection while probing SQLite limits")

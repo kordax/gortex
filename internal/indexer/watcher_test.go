@@ -518,8 +518,8 @@ func TestMutationAdmissionBoundsConcurrency(t *testing.T) {
 		admitted <- err
 	}()
 	select {
-	case <-admitted:
-		t.Fatal("admission succeeded while every slot was held")
+	case err := <-admitted:
+		t.Fatalf("admission returned while every slot was held: %v", err)
 	case <-time.After(50 * time.Millisecond):
 	}
 

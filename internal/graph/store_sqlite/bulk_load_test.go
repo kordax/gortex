@@ -867,7 +867,9 @@ func TestCoordinatedBulkLoadRoutesSingleRowSidecarsOnPinnedConnection(t *testing
 	case <-time.After(time.Second):
 		// Let a legacy pool-routed writer drain so test cleanup cannot hang.
 		s.db.SetMaxOpenConns(2)
-		<-done
+		if err := <-done; err != nil {
+			t.Errorf("sidecar write after releasing pooled connection: %v", err)
+		}
 		t.Fatal("single-row sidecar writer waited for a second pooled connection")
 	}
 	if err := s.EndCoordinatedBulkLoad(); err != nil {
