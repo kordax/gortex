@@ -1,0 +1,245 @@
+package store_sqlite
+
+import (
+	"database/sql"
+	"fmt"
+	"path/filepath"
+	"sort"
+	"strings"
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+var foreignKeyRepairIndexes = []string{
+	"maintenance_analysis_steps_node_rowid",
+	"maintenance_ref_view_builds_ref_view_id",
+	"maintenance_dedicated_graphs_family_id",
+}
+
+func foreignKeyPlan(t *testing.T, db *sql.DB, query string, args ...any) []string {
+	t.Helper()
+	rows, err := db.Query("EXPLAIN QUERY PLAN "+query, args...)
+	require.NoError(t, err)
+	defer func() { require.NoError(t, rows.Close()) }()
+	var details []string
+	for rows.Next() {
+		var id, parent, unused int
+		var detail string
+		require.NoError(t, rows.Scan(&id, &parent, &unused, &detail))
+		details = append(details, detail)
+	}
+	require.NoError(t, rows.Err())
+	return details
+}
+
+func assertForeignKeySearch(t *testing.T, plan []string, table string) {
+	t.Helper()
+	found := false
+	for _, detail := range plan {
+		assert.NotContains(t, detail, "SCAN "+table, "unindexed child probe: %v", plan)
+		found = found || strings.HasPrefix(detail, "SEARCH "+table+" ")
+	}
+	assert.True(t, found, "no indexed child probe for %s: %v", table, plan)
+}
+
+func foreignKeySchemaIndexes(t *testing.T, db *sql.DB) map[string]string {
+	t.Helper()
+	rows, err := db.Query(`SELECT name, sql FROM sqlite_schema WHERE type = 'index' AND sql IS NOT NULL`)
+	require.NoError(t, err)
+	defer func() { require.NoError(t, rows.Close()) }()
+	indexes := make(map[string]string)
+	for rows.Next() {
+		var name, ddl string
+		require.NoError(t, rows.Scan(&name, &ddl))
+		indexes[name] = ddl
+	}
+	require.NoError(t, rows.Err())
+	return indexes
+}
+
+func TestForeignKeyChildIndexesAllPredicatesSearch(t *testing.T) {
+	s, err := Open(filepath.Join(t.TempDir(), "store.sqlite"))
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, s.Close()) })
+	rows, err := s.db.Query(`SELECT name FROM sqlite_schema WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name`)
+	require.NoError(t, err)
+	var tables []string
+	for rows.Next() {
+		var table string
+		require.NoError(t, rows.Scan(&table))
+		tables = append(tables, table)
+	}
+	require.NoError(t, rows.Err())
+	require.NoError(t, rows.Close())
+	predicates := 0
+	for _, table := range tables {
+		fkRows, err := s.db.Query(`SELECT id, "from" FROM pragma_foreign_key_list(?) ORDER BY id, seq`, table)
+		require.NoError(t, err)
+		keys := make(map[int][]string)
+		for fkRows.Next() {
+			var id int
+			var column string
+			require.NoError(t, fkRows.Scan(&id, &column))
+			keys[id] = append(keys[id], column)
+		}
+		require.NoError(t, fkRows.Err())
+		require.NoError(t, fkRows.Close())
+		ids := make([]int, 0, len(keys))
+		for id := range keys {
+			ids = append(ids, id)
+		}
+		sort.Ints(ids)
+		for _, id := range ids {
+			predicates++
+			t.Run(fmt.Sprintf("%s/fk%d", table, id), func(t *testing.T) {
+				var where []string
+				var args []any
+				for _, column := range keys[id] {
+					where = append(where, `"`+column+`" = ?`)
+					args = append(args, 1)
+				}
+				plan := foreignKeyPlan(t, s.db, `SELECT 1 FROM "`+table+`" WHERE `+strings.Join(where, " AND "), args...)
+				assertForeignKeySearch(t, plan, table)
+			})
+		}
+	}
+	// Enumerate the schema rather than maintaining a hand-picked list, including
+	// the four nullable child keys whose existing IS NOT NULL indexes suffice.
+	assert.GreaterOrEqual(t, predicates, 26)
+	t.Logf("checked %d foreign-key child predicates", predicates)
+}
+
+func assertForeignKeyDeletePlans(t *testing.T, db *sql.DB) {
+	t.Helper()
+	var enabled int
+	require.NoError(t, db.QueryRow(`PRAGMA foreign_keys`).Scan(&enabled))
+	require.Equal(t, 1, enabled)
+	for _, test := range []struct{ parent, key, child string }{
+		{"analysis_nodes", "id", "analysis_process_steps"},
+		{"ref_views", "ref_view_id", "ref_view_builds"},
+		{"repository_families", "family_id", "dedicated_graphs"},
+	} {
+		plan := foreignKeyPlan(t, db, "DELETE FROM "+test.parent+" WHERE "+test.key+" = ?", 1)
+		assertForeignKeySearch(t, plan, test.child)
+	}
+	plan := foreignKeyPlan(t, db, `DELETE FROM view_generations WHERE generation_id = ?`, 1)
+	for _, child := range []string{"view_generations", "checkout_routes", "ref_views"} {
+		assertForeignKeySearch(t, plan, child)
+	}
+	// Exercise the exact statement used by generation GC, not just an isolated
+	// SELECT that might conceal the foreign-key work appended by SQLite.
+	for _, table := range analysisGenerationGCTables {
+		if table.name == "nodes" {
+			assertForeignKeySearch(t, foreignKeyPlan(t, db, table.delete, 1, 1000), "analysis_process_steps")
+		}
+	}
+}
+
+func seedForeignKeyGenerations(t *testing.T, db *sql.DB) {
+	t.Helper()
+	for generation := 1; generation <= 3; generation++ {
+		_, err := db.Exec(`INSERT INTO analysis_generations
+			(generation_id, format_version, build_revision, created_at_unix, state, node_count, community_count, process_count, concept_count)
+			VALUES (?, 1, 1, 1, 1, 1, 0, 1, 0)`, generation)
+		require.NoError(t, err)
+		_, err = db.Exec(`INSERT INTO analysis_nodes(id, generation_id, node_id) VALUES (?, ?, ?)`, generation, generation, fmt.Sprintf("node-%d", generation))
+		require.NoError(t, err)
+		_, err = db.Exec(`INSERT INTO analysis_processes(generation_id, process_id, step_count) VALUES (?, 'process', 1)`, generation)
+		require.NoError(t, err)
+		_, err = db.Exec(`INSERT INTO analysis_process_steps(generation_id, process_id, ordinal, node_rowid, depth) VALUES (?, 'process', 0, ?, 0)`, generation, generation)
+		require.NoError(t, err)
+	}
+	_, err := db.Exec(`INSERT INTO analysis_active_generation(slot, generation_id) VALUES (1, 3)`)
+	require.NoError(t, err)
+}
+
+func TestForeignKeyChildIndexesUpgradeV21InPlace(t *testing.T) {
+	for _, repaired := range []bool{false, true} {
+		t.Run(fmt.Sprintf("maintenance_indexes=%t", repaired), func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "store.sqlite")
+			s, err := Open(path)
+			require.NoError(t, err)
+			seedForeignKeyGenerations(t, s.writerDB)
+			_, err = s.writerDB.Exec(`INSERT INTO nodes(id, kind, name) VALUES ('preserved', 'function', 'Preserved')`)
+			require.NoError(t, err)
+			require.NoError(t, s.Close())
+			var before map[string]string
+			withRawDB(t, path, func(db *sql.DB) {
+				if !repaired {
+					for _, name := range foreignKeyRepairIndexes {
+						_, err := db.Exec("DROP INDEX " + name)
+						require.NoError(t, err)
+					}
+					// This reproduces the old plan even with the generation-leading
+					// analysis_process_steps_by_node index still present.
+					plan := foreignKeyPlan(t, db, `SELECT 1 FROM analysis_process_steps WHERE node_rowid = ?`, 1)
+					require.Contains(t, strings.Join(plan, "\n"), "SCAN analysis_process_steps")
+				}
+				before = foreignKeySchemaIndexes(t, db)
+				require.NoError(t, setUserVersion(db, 21))
+			})
+			upgraded, err := Open(path)
+			require.NoError(t, err)
+			t.Cleanup(func() { require.NoError(t, upgraded.Close()) })
+			assert.False(t, upgraded.NeedsRebuild())
+			version, err := readUserVersion(upgraded.db)
+			require.NoError(t, err)
+			assert.Equal(t, currentSchemaVersion, version)
+			assert.Equal(t, 1, nodeCount(t, upgraded.db))
+			after := foreignKeySchemaIndexes(t, upgraded.db)
+			if repaired {
+				assert.Equal(t, before, after, "maintenance repairs must not gain duplicate indexes")
+			} else {
+				for _, name := range foreignKeyRepairIndexes {
+					require.Contains(t, after, name)
+					delete(after, name)
+				}
+				assert.Equal(t, before, after, "only the three missing indexes are added")
+			}
+			assertForeignKeyDeletePlans(t, upgraded.writerDB)
+			// Actual generation GC removes generation 1 and its process rows,
+			// retaining generation 2 plus active generation 3 without reindexing.
+			require.NoError(t, upgraded.PruneAnalysisGenerations(t.Context(), 1, 1))
+			for _, table := range []string{"analysis_generations", "analysis_nodes", "analysis_processes", "analysis_process_steps"} {
+				var ids []int
+				rows, err := upgraded.db.Query("SELECT generation_id FROM " + table + " ORDER BY generation_id")
+				require.NoError(t, err)
+				for rows.Next() {
+					var id int
+					require.NoError(t, rows.Scan(&id))
+					ids = append(ids, id)
+				}
+				require.NoError(t, rows.Err())
+				require.NoError(t, rows.Close())
+				assert.Equal(t, []int{2, 3}, ids, table)
+			}
+		})
+	}
+}
+
+func TestForeignKeyChildIndexesFreshDeleteIntegrity(t *testing.T) {
+	s, err := Open(filepath.Join(t.TempDir(), "store.sqlite"))
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, s.Close()) })
+	assertForeignKeyDeletePlans(t, s.writerDB)
+	seedForeignKeyGenerations(t, s.writerDB)
+	_, err = s.writerDB.Exec(`DELETE FROM analysis_nodes WHERE id = 1`)
+	require.Error(t, err, "the new index must preserve the step-to-node constraint")
+	_, err = s.writerDB.Exec(`INSERT INTO repository_families(family_id, common_dir_identity, state) VALUES ('family', 'common', 'ready')`)
+	require.NoError(t, err)
+	_, err = s.writerDB.Exec(`INSERT INTO dedicated_graphs(graph_id, repo_prefix, family_id, state) VALUES ('graph', 'repo', 'family', 'ready')`)
+	require.NoError(t, err)
+	_, err = s.writerDB.Exec(`DELETE FROM repository_families WHERE family_id = 'family'`)
+	require.Error(t, err, "a non-primary graph still restricts family deletion")
+	_, err = s.writerDB.Exec(`INSERT INTO ref_views(ref_view_id, graph_id, selector_kind, selector_value, enrichment_profile, state) VALUES ('view', 'graph', 'ref', 'main', '', 'ready')`)
+	require.NoError(t, err)
+	_, err = s.writerDB.Exec(`INSERT INTO ref_view_builds(build_id, ref_view_id, build_fingerprint, captured_route_epoch, state, build_token) VALUES ('build', 'view', 'fingerprint', 0, 'ready', 'token')`)
+	require.NoError(t, err)
+	_, err = s.writerDB.Exec(`DELETE FROM ref_views WHERE ref_view_id = 'view'`)
+	require.NoError(t, err)
+	var builds int
+	require.NoError(t, s.db.QueryRow(`SELECT COUNT(*) FROM ref_view_builds`).Scan(&builds))
+	assert.Zero(t, builds, "completed build rows still cascade when their view is deleted")
+}

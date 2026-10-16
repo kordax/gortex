@@ -1,0 +1,85 @@
+diff --git a/internal/graph/store_sqlite/schema.go b/internal/graph/store_sqlite/schema.go
+index 7af58075..b6761350 100644
+--- a/internal/graph/store_sqlite/schema.go
++++ b/internal/graph/store_sqlite/schema.go
+@@ -443,6 +443,7 @@ CREATE TABLE IF NOT EXISTS analysis_process_steps (
+ ) WITHOUT ROWID;
+ CREATE INDEX IF NOT EXISTS analysis_process_steps_by_node
+     ON analysis_process_steps(generation_id, node_rowid, process_id);
++` + analysisStepsNodeForeignKeyIndexDDL + `;
+ 
+ CREATE TABLE IF NOT EXISTS analysis_concepts (
+     generation_id INTEGER NOT NULL
+@@ -475,6 +476,23 @@ CREATE TABLE IF NOT EXISTS analysis_blobs (
+ ) WITHOUT ROWID;
+ `
+ 
++// These child-key indexes serve SQLite's foreign-key checks during parent
++// deletion. A generation-leading composite key cannot seek node_rowid alone;
++// partial indexes limited to primary graphs or building attempts omit children
++// that still participate in foreign-key enforcement. Keep the repair names so
++// manually maintained stores gain no duplicate indexes when upgraded.
++const (
++	analysisStepsNodeForeignKeyIndexDDL     = `CREATE INDEX IF NOT EXISTS maintenance_analysis_steps_node_rowid ON analysis_process_steps(node_rowid)`
++	refViewBuildsForeignKeyIndexDDL         = `CREATE INDEX IF NOT EXISTS maintenance_ref_view_builds_ref_view_id ON ref_view_builds(ref_view_id)`
++	dedicatedGraphsFamilyForeignKeyIndexDDL = `CREATE INDEX IF NOT EXISTS maintenance_dedicated_graphs_family_id ON dedicated_graphs(family_id)`
++)
++
++var foreignKeyChildIndexDDL = []string{
++	analysisStepsNodeForeignKeyIndexDDL,
++	refViewBuildsForeignKeyIndexDDL,
++	dedicatedGraphsFamilyForeignKeyIndexDDL,
++}
++
+ // checkoutCatalogSchemaSQL is the checkout-lifecycle control plane: which
+ // working copies the daemon knows about, what it intends to do with each one,
+ // which graph and view generation a checkout currently routes to, and what is
+@@ -628,6 +646,7 @@ CREATE TABLE IF NOT EXISTS dedicated_graphs (
+ -- of a family do not collide with each other.
+ CREATE UNIQUE INDEX IF NOT EXISTS dedicated_graphs_primary_base
+     ON dedicated_graphs(family_id) WHERE is_primary_base = 1;
++` + dedicatedGraphsFamilyForeignKeyIndexDDL + `;
+ 
+ -- An immutable-once-ready build of a view. Named view_generations rather than
+ -- "generations" so it cannot be confused with the analysis_generations cache,
+@@ -754,6 +773,7 @@ CREATE TABLE IF NOT EXISTS ref_view_builds (
+ CREATE UNIQUE INDEX IF NOT EXISTS ref_view_builds_single_inflight
+     ON ref_view_builds(ref_view_id, desired_tree, base_generation_id, build_fingerprint)
+     WHERE state = 'building';
++` + refViewBuildsForeignKeyIndexDDL + `;
+ 
+ -- Deferred deletion work. Targets are recorded as an opaque encoded list,
+ -- never as foreign keys: the whole point of the journal is to survive the
+diff --git a/internal/graph/store_sqlite/schema_version.go b/internal/graph/store_sqlite/schema_version.go
+index 235f7cf7..23f91040 100644
+--- a/internal/graph/store_sqlite/schema_version.go
++++ b/internal/graph/store_sqlite/schema_version.go
+@@ -34,7 +34,7 @@ import (
+ // index changes in a way an old on-disk DB would not already have, and append a
+ // matching schemaMigrations entry describing how to bring an older store
+ // forward (in place, or by rebuild).
+-const currentSchemaVersion = 21
++const currentSchemaVersion = 22
+ 
+ // schemaMigration is one forward step. Exactly one strategy applies:
+ //   - rebuild=true: the change introduces structure/data that can only come
+@@ -118,6 +118,19 @@ var schemaMigrations = []schemaMigration{
+ 	{version: 19, name: "purge legacy slash-spelled coverage artifacts", inPlace: purgeLegacyCoverageSpellings},
+ 	{version: 20, name: "purge unresolved derived tests edges", inPlace: purgeUnresolvedTestsEdges},
+ 	{version: 21, name: "persist per-file indexing failures", inPlace: createFileIndexFailuresTable},
++	{version: 22, name: "index child foreign-key probes", inPlace: createForeignKeyChildIndexes},
++}
++
++// createForeignKeyChildIndexes upgrades existing stores without rebuilding any
++// data. The names deliberately match the indexes used to repair affected stores
++// manually, so an upgrade does not create duplicate copies of those indexes.
++func createForeignKeyChildIndexes(tx *sql.Tx) error {
++	for _, ddl := range foreignKeyChildIndexDDL {
++		if _, err := tx.Exec(ddl); err != nil {
++			return err
++		}
++	}
++	return nil
+ }
+ 
+ // createGenerationMaskTables is the explicit v18 migration. The mask tables are
