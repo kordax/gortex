@@ -16,6 +16,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/zzet/gortex/internal/observability"
 	collecttrace "go.opentelemetry.io/proto/otlp/collector/trace/v1"
 	"google.golang.org/protobuf/proto"
 )
@@ -108,7 +109,28 @@ func TestDaemonObservabilityIntegration(t *testing.T) {
 	assert.NotContains(t, metrics, f.primary)
 	assert.NotContains(t, metrics, "Issue767PrimaryMarker")
 	assert.Contains(t, metrics, "gortex_mcp_requests_total")
-	code, _ := read("metrics", "/debug/pprof/heap")
+	code, page := read("metrics", "/")
+	assert.Equal(t, http.StatusOK, code)
+	assert.Contains(t, page, "Gortex")
+	code, currentJSON := read("metrics", "/api/v1/current")
+	assert.Equal(t, http.StatusOK, code)
+	var current observability.HistorySample
+	require.NoError(t, json.Unmarshal([]byte(currentJSON), &current))
+	assert.Positive(t, current.At)
+	assert.Contains(t, current.Values, "gortex_runtime_goroutines")
+	code, historyJSON := read("metrics", "/api/v1/history?seconds=86400&limit=10&scope=charts")
+	assert.Equal(t, http.StatusOK, code)
+	var history struct {
+		Samples   []observability.HistorySample `json:"samples"`
+		Available bool                          `json:"available"`
+		Retention int                           `json:"retention_seconds"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(historyJSON), &history))
+	require.True(t, history.Available)
+	require.NotEmpty(t, history.Samples)
+	assert.Equal(t, 86400, history.Retention)
+	oldPoint := history.Samples[0].At
+	code, _ = read("metrics", "/debug/pprof/heap")
 	assert.Equal(t, 404, code)
 	code, _ = read("profiles", "/debug/pprof/cmdline")
 	assert.Equal(t, 404, code, "diagnostics must not expose daemon argv")
@@ -127,6 +149,31 @@ func TestDaemonObservabilityIntegration(t *testing.T) {
 		require.NoError(t, err, "isolated collector stack: %s", output)
 		t.Logf("collector stack: %s", output)
 	}
+	f.stop()
+	f.start()
+	logs, err = os.ReadFile(f.log.Name())
+	require.NoError(t, err)
+	for _, line := range bytes.Split(logs, []byte("\n")) {
+		var entry struct {
+			Message string `json:"msg"`
+			Kind    string `json:"kind"`
+			Address string `json:"address"`
+		}
+		if json.Unmarshal(line, &entry) == nil && entry.Message == "daemon: local observability listener" {
+			addresses[entry.Kind] = entry.Address
+		}
+	}
+	code, historyJSON = read("metrics", "/api/v1/history?seconds=86400&limit=10&scope=charts")
+	require.Equal(t, http.StatusOK, code)
+	require.NoError(t, json.Unmarshal([]byte(historyJSON), &history))
+	assert.True(t, history.Available)
+	found := false
+	for _, sample := range history.Samples {
+		if sample.At == oldPoint {
+			found = true
+		}
+	}
+	assert.True(t, found, "daily history must survive a daemon restart")
 	f.stop()
 	assert.False(t, privatePayload.Load(), "trace payload must not contain fixture paths or source symbols")
 	t.Logf("isolated daemon metrics, monitor, profile and %d OTLP spans verified", spans.Load())

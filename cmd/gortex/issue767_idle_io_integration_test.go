@@ -170,7 +170,7 @@ func newIssue767Fixture(t *testing.T, binary string) *issue767Fixture {
 	}
 	f.env = append(f.env,
 		"XDG_CONFIG_HOME="+filepath.Join(root, "config"), "XDG_DATA_HOME="+filepath.Join(root, "data"), "XDG_CACHE_HOME="+filepath.Join(root, "cache"),
-		"GORTEX_DAEMON_PPROF_ADDR=127.0.0.1:0", "GORTEX_RECONCILE_INTERVAL=5s",
+		"GORTEX_DAEMON_PPROF_ADDR=127.0.0.1:0", "GORTEX_METRICS_ADDR=127.0.0.1:0", "GORTEX_RECONCILE_INTERVAL=5s",
 		"GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL="+filepath.Join(root, "gitconfig"), "GIT_TERMINAL_PROMPT=0", "GOWORK=off", "NO_COLOR=1", "CI=1")
 	f.write(filepath.Join(root, "gitconfig"), "[user]\n\tname = Issue767 Test\n\temail = issue767@example.invalid\n[commit]\n\tgpgsign = false\n")
 	f.write(filepath.Join(f.primary, "go.mod"), "module example.invalid/issue767\n\ngo 1.24\n")

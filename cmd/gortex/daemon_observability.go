@@ -12,6 +12,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/zzet/gortex/internal/daemon"
 	"github.com/zzet/gortex/internal/diagnostics"
+	"github.com/zzet/gortex/internal/observability"
 	"go.uber.org/zap"
 )
 
@@ -19,7 +20,7 @@ var daemonMetricsAddr string
 var daemonDiagnosticsAddr string
 
 func init() {
-	daemonStartCmd.Flags().StringVar(&daemonMetricsAddr, "metrics-addr", "", "Prometheus endpoint on a loopback address, e.g. 127.0.0.1:9474 (or GORTEX_METRICS_ADDR; disabled by default)")
+	daemonStartCmd.Flags().StringVar(&daemonMetricsAddr, "metrics-addr", "127.0.0.1:9474", "local dashboard and Prometheus address (or GORTEX_METRICS_ADDR; off disables HTTP, collection continues)")
 	daemonStartCmd.Flags().StringVar(&daemonDiagnosticsAddr, "diagnostics-addr", "", "bounded Go profiles on a separate loopback address, e.g. 127.0.0.1:9475 (or GORTEX_DIAGNOSTICS_ADDR; disabled by default)")
 }
 
@@ -47,6 +48,7 @@ func setupDaemonTracing(logger *zap.Logger) (func(), error) {
 func startDaemonObservability(cmd *cobra.Command, srv *daemon.Server, controller *realController, logger *zap.Logger) (func(), error) {
 	ctx, cancel := context.WithCancel(context.Background())
 	var servers []*http.Server
+	var history *daemonMetricHistory
 	var once sync.Once
 	stop := func() {
 		once.Do(func() {
@@ -58,6 +60,9 @@ func startDaemonObservability(cmd *cobra.Command, srv *daemon.Server, controller
 				if err := server.Shutdown(shutdownCtx); err != nil {
 					_ = server.Close()
 				}
+			}
+			if history != nil {
+				history.close()
 			}
 		})
 	}
@@ -96,12 +101,30 @@ func startDaemonObservability(cmd *cobra.Command, srv *daemon.Server, controller
 		logger.Info("daemon: local observability listener", zap.String("kind", kind), zap.String("address", listener.Addr().String()))
 		return nil
 	}
+	metricSource := daemonMetricsHandler(ctx, srv, controller)
+	history = startDaemonMetricHistory(ctx, metricSource, logger)
+	var reader observability.HistoryReader
+	if history.store != nil {
+		reader = history.store
+	}
 	metricsMux := http.NewServeMux()
-	metricsMux.Handle("/metrics", daemonMetricsHandler(ctx, srv, controller))
-	metricsMux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte("ok\n")) })
-	if err := start("metrics", address("metrics-addr", daemonMetricsAddr, "GORTEX_METRICS_ADDR"), diagnostics.LocalOnly(metricsMux)); err != nil {
-		stop()
-		return nil, err
+	metricsMux.Handle("/metrics", metricSource)
+	metricsMux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			w.Header().Set("Allow", http.MethodGet)
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		_, _ = w.Write([]byte("ok\n"))
+	})
+	metricsMux.Handle("/", observability.DashboardHandler(reader, history.current))
+	metricsAddress, explicit := daemonDashboardAddress(cmd, daemonMetricsAddr)
+	if err := start("metrics", metricsAddress, diagnostics.LocalOnly(metricsMux)); err != nil {
+		if explicit {
+			stop()
+			return nil, err
+		}
+		logger.Warn("daemon: default dashboard address unavailable; metric collection continues", zap.String("address", metricsAddress))
 	}
 	profileAddress := address("diagnostics-addr", daemonDiagnosticsAddr, "GORTEX_DIAGNOSTICS_ADDR")
 	if profileAddress == "" && !cmd.Flags().Changed("diagnostics-addr") && os.Getenv("GORTEX_DIAGNOSTICS_ADDR") == "" {
@@ -116,4 +139,20 @@ func startDaemonObservability(cmd *cobra.Command, srv *daemon.Server, controller
 		return nil, err
 	}
 	return stop, nil
+}
+
+func daemonDashboardAddress(cmd *cobra.Command, value string) (string, bool) {
+	if cmd.Flags().Changed("metrics-addr") {
+		if value == "off" {
+			value = ""
+		}
+		return value, true
+	}
+	if configured, exists := os.LookupEnv("GORTEX_METRICS_ADDR"); exists {
+		if configured == "off" {
+			configured = ""
+		}
+		return configured, true
+	}
+	return "127.0.0.1:9474", false
 }

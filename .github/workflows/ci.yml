@@ -53,6 +53,10 @@ jobs:
         if: matrix.os == 'windows-latest'
         run: go test -v -timeout=45m ./...
 
+      - name: Test built-in dashboard counters, gaps and restarts
+        if: runner.os == 'Linux'
+        run: node --test internal/observability/dashboard/app.test.cjs
+
       - name: Test fork installers without network or daemon changes
         if: runner.os == 'Linux'
         run: |

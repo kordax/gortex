@@ -1,10 +1,29 @@
 # Local Gortex observability
 
-Prometheus records daemon metrics. Grafana provides the dashboards. Tempo stores optional sampled traces. Gortex remains a native Linux process; these containers are an optional companion application. No exporter, cloud account or paid service is required.
+The daemon continuously records lightweight metrics and serves an embedded dashboard at http://127.0.0.1:9474. Open it in a browser; no containers, exporter, cloud account or paid service are required. Prometheus, Grafana and Tempo remain an optional companion stack for additional queries and sampled traces.
 
 The stack never starts, configures or restarts Gortex. Use a build containing the observability changes before enabling its endpoints. Older releases do not provide these metrics.
 
-## Start the interface
+## Built-in interface and daily history
+
+Metrics are sampled every 10 seconds, whether or not a browser or Prometheus is connected. The embedded interface shows live CPU, memory, MCP traffic and latency, readiness and cached repository metadata. It supports 15-minute, one-hour, six-hour and 24-hour ranges; pausing the display does not pause collection. Unknown data stays unavailable. Counter rates break at process restarts and long gaps.
+
+History is stored separately from the graph in `observability/history.sqlite` under the daemon's cache directory. It survives restart and serves no point older than 24 hours. Startup, reads, writes and the periodic collector expire old records. While the daemon is stopped no cleanup runs; startup removes expired records before serving history. Up to 8640 points and 32 MiB of compressed payload are retained, so high cardinality can shorten the available window. The SQLite file has a separate bounded page budget and rollback-journal overhead; this is not a claim that total disk usage is exactly 32 MiB. No request arguments, source text, credentials or raw error messages are recorded. Daily MCP charts aggregate operations; the Prometheus endpoint retains per-operation counters.
+
+The default listener is `127.0.0.1:9474`. `GORTEX_METRICS_ADDR` or `--metrics-addr` changes it; an explicit empty value or `off` disables HTTP while history continues. If the default port is occupied, collection continues and the daemon logs that the dashboard is unavailable. An explicitly configured invalid or occupied address fails startup. HTTP remains loopback-only with Host/Origin checks. A storage failure leaves live metrics running and is reported as unavailable history.
+
+Read-only GET endpoints are `/api/v1/current` (latest sample with Unix-millisecond `at` and canonical metric `values`) and `/api/v1/history?seconds=3600&limit=360` (samples, availability and 86400-second retention). History accepts `seconds` from 1 to 86400, `limit` from 2 to 1440, and optional `scope=charts` to omit repository metadata from frequent chart refreshes. Responses and concurrent readers are bounded; errors never expose filesystem paths or SQL. `/metrics` remains the Prometheus endpoint. Expensive profiles and exported traces are still opt-in.
+
+Build and activate these changes when agent work permits:
+
+```sh
+bash scripts/install-local.sh
+"$HOME/.local/bin/gortex" daemon restart
+```
+
+Restart interrupts active MCP connections. Development checks use private homes, stores and disposable daemons instead of changing the working installation. The published v1.1.0 predates the built-in daily history, so downloading that release does not install these source changes.
+
+## Optional Grafana interface
 
 Requirements: native Linux, Docker Engine with Compose, Python 3, and available loopback ports 3000 and 9090. Tracing also needs 3200, 4318 and 9095.
 
@@ -33,9 +52,9 @@ Missing data stays missing. It is not converted to zero. Repository counts are c
 
 [Prometheus](http://127.0.0.1:9090/targets) shows whether the `gortex` target is reachable. Starting the stack before enabling daemon metrics produces an expected DOWN target.
 
-## Enable metrics in the native daemon
+## Configure the native daemon endpoint
 
-Metrics are opt-in and listen separately from profiling. For an existing systemd user service:
+Metrics collection and the local dashboard are enabled by default and listen separately from profiling. No service override is needed for the default address. To choose an address explicitly for an existing systemd user service:
 
 ```sh
 systemctl --user edit com.zzet.gortex.service
@@ -102,7 +121,7 @@ sh deploy/observability/stack.sh down
 
 `down` preserves named volumes and the password. Stop and start the stack to apply configuration changes. Changing the initial password file does not reset an existing Grafana account; use Grafana's password controls.
 
-Defaults: Prometheus keeps up to 7 days or approximately 2 GB of TSDB blocks, whichever retention threshold is reached first. WAL/head data needs additional disk space. Prometheus and Grafana each have a 512 MiB memory limit; optional Tempo has 1 GiB. Each container is limited to one CPU. Logs rotate at 10 MB with two files. These are starting limits for a workstation, not guarantees about workload capacity; inspect collector logs for OOMs or rejected scrapes before increasing them.
+Defaults: Prometheus is configured for one day or approximately 2 GB of TSDB blocks, whichever retention threshold is reached first. Prometheus removes whole blocks asynchronously; this is not an exact per-record deletion deadline. WAL/head data needs additional disk space. Prometheus and Grafana each have a 512 MiB memory limit; optional Tempo has 1 GiB. Each container is limited to one CPU. Logs rotate at 10 MB with two files. These are starting limits for a workstation, not guarantees about workload capacity; inspect collector logs for OOMs or rejected scrapes before increasing them.
 
 Images are pinned to Prometheus 3.15.0, Grafana 13.2.4 and Tempo 3.1.0. Review their release/security notes and rerun the smoke test when updating pins. No unpinned plugin downloads are needed.
 
