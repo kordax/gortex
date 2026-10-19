@@ -1074,7 +1074,9 @@ func (mw *MultiWatcher) EnqueueFileMutation(ctx context.Context, filePath string
 		return nil, err
 	}
 	prefix := mw.multi.RepoForFile(filePath)
-	mw.mu.Lock()
+	if err := mw.lockMutationRoute(ctx); err != nil {
+		return nil, err
+	}
 	w := mw.watchers[prefix]
 	started := mw.started[prefix]
 	// A single-repo MultiIndexer may intentionally use the empty prefix;
