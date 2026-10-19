@@ -1189,6 +1189,12 @@ func (s *Server) runBatchTransaction(ctx context.Context, edits []batchEditItem,
 			session.recordSymbol(plan.edit.SymbolID)
 		}
 	}
+	if receipt.CheckoutID == "" {
+		// Canonical publication reconciles the latest disk bytes. Its admission
+		// can block, but the durable commit no longer needs filesystem locks.
+		// Keep checkout publication under its existing generation discipline.
+		release()
+	}
 	s.refreshBatchGraphForContext(ctx, state)
 	return state.snapshot(), nil
 }

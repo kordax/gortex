@@ -365,6 +365,11 @@ func (s *Server) recoverBatchTransaction(ctx context.Context, state *batchTransa
 		receipt.Status, receipt.DiskStatus, receipt.GraphStatus = "committed", "committed", "pending"
 		receipt.Error = ""
 		state.publish(receipt, false)
+		if receipt.CheckoutID == "" {
+			// Recovery has verified and persisted the terminal disk state.
+			// Publication must not retain locks needed by the next edit.
+			release()
+		}
 		s.refreshBatchGraphForContext(ctx, state)
 	case len(before) == len(receipt.Files):
 		receipt.Recovered = true
