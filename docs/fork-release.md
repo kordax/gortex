@@ -4,7 +4,32 @@ This fork has independent versions and updates at [kordax/gortex](https://github
 
 `gortex version` identifies the binary with `fork by kordax`, the fork repository, version and commit. Check `command -v gortex` too: an older installation earlier in `PATH` can still win. A running daemon keeps its previous executable until explicitly restarted.
 
-## Install v1.0.0
+## Current release: v1.1.0
+
+This release adds daemon monitoring, opt-in Prometheus metrics, OpenTelemetry tracing, bounded profiles and performance benchmarks. It includes a locally built static Linux amd64 archive and Debian package. Other platforms, cosign signatures and SLSA attestations are not included. Local checks are required before publication; GitHub CI is not awaited for this maintainer-requested manual release.
+
+Install the latest published release into `~/.local/bin` from this checkout:
+
+```sh
+sh scripts/install.sh
+"$HOME/.local/bin/gortex" daemon restart
+gortex version
+```
+
+The installer resolves the latest fork tag and verifies SHA-256. If cosign is installed, it also requires workflow signatures and refuses unsigned manual releases. Keep verification enabled; use the trusted-binary procedure below for an explicitly trusted manual build, substituting `v1.1.0` for `v1.0.0`.
+
+For Debian or Ubuntu, download `gortex_linux_amd64.deb` from [v1.1.0](https://github.com/kordax/gortex/releases/tag/v1.1.0), verify it against `checksums.txt`, then install:
+
+```sh
+sudo apt install ./gortex_linux_amd64.deb
+/usr/bin/gortex version
+```
+
+The package installs `/usr/bin/gortex` without restarting the daemon. An existing `~/.local/bin/gortex` earlier in PATH still takes precedence, and an existing service keeps its configured executable path. Use the archive installer when updating that user installation.
+
+For a manual release, keep the release workflow disabled only during tag and asset publication, restore its prior state even on failure, and leave CI/security workflows enabled. Publish a draft as latest only after downloading its assets again and verifying checksums, the executable identity and package contents. Do not fabricate workflow signatures or attestations.
+
+## Historical v1.0.0 installation
 
 `v1.0.0` is an exceptional manual **Linux amd64** release, built and checked locally. Its published artifacts are `gortex_linux_amd64.tar.gz` and `checksums.txt`. It has no cosign signatures, SLSA provenance, macOS/Windows builds, arm64 builds or Linux package-manager artifacts. GitHub CI runs in the background; its completion is not a verification claim for this manual release.
 
