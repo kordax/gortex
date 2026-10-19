@@ -1179,6 +1179,13 @@ func (s *Server) runBatchTransaction(ctx context.Context, edits []batchEditItem,
 	}
 	state.publish(receipt, false)
 
+	if receipt.CheckoutID == "" {
+		// The disk commit is durable and terminal. Neither session bookkeeping
+		// nor graph admission may retain filesystem locks needed by another
+		// session. Canonical publication reconciles the latest disk bytes.
+		// Keep checkout publication under its existing generation discipline.
+		release()
+	}
 	for _, plan := range plans {
 		session := s.sessionFor(ctx)
 		session.recordModified(plan.file)
@@ -1188,12 +1195,6 @@ func (s *Server) runBatchTransaction(ctx context.Context, edits []batchEditItem,
 		if plan.edit.SymbolID != "" {
 			session.recordSymbol(plan.edit.SymbolID)
 		}
-	}
-	if receipt.CheckoutID == "" {
-		// Canonical publication reconciles the latest disk bytes. Its admission
-		// can block, but the durable commit no longer needs filesystem locks.
-		// Keep checkout publication under its existing generation discipline.
-		release()
 	}
 	s.refreshBatchGraphForContext(ctx, state)
 	return state.snapshot(), nil
