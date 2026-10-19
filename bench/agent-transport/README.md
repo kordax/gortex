@@ -110,8 +110,10 @@ This mode defaults to a normal build without the race detector. Set
 number of query clients plus one mutation client, all independent proxy
 processes. Query clients cycle through symbol search, exact file reads and
 `change.detect` over known unstaged changes to a shared target and a mutation
-leaf. Every generated function calls that shared target, so detection includes
-substantial dependency fanout. The writer performs sequential
+leaf. Every generated function contains a call to that shared target. The
+ordinary mode checks transport and mutation correctness; searchable startup does
+not prove those calls have been resolved yet. Use strict diagnostics below to
+require resolved fanout and a nonempty impact traversal. The writer performs sequential
 batch edits and checks each original transaction ID, including after errors.
 No semantic miss or uncertain mutation is retried.
 
@@ -135,6 +137,90 @@ later requests; its own time after a reply is excluded from that reply's latency
 Requests have a 90-second deadline. Profiles stay in the private fixture's
 `clients-N` directories. A fast synthetic run does not explain or rule out the
 previously observed 59-second calls against a larger production graph.
+
+## Strict stall diagnostics
+
+Use the same temporary fixture with complete enrichment and a known dependency
+frontier before measuring `change.detect` and `change.contract`:
+
+```sh
+GORTEX_AGENT_SCENARIO=mixed \
+GORTEX_AGENT_FILES=2048 GORTEX_AGENT_DECLARATIONS=32 \
+GORTEX_AGENT_MIXED_CLIENTS=1,4 GORTEX_AGENT_ROUNDS=12 \
+GORTEX_AGENT_CONTRACT=1 GORTEX_AGENT_MUTATIONS=0 \
+GORTEX_AGENT_PROFILE_KIND=block GORTEX_AGENT_SLOW_REQUEST=100ms \
+GORTEX_AGENT_ARTIFACT_DIR=/tmp/gortex-stall-block \
+bash scripts/test-agent-transport.sh
+```
+
+`GORTEX_AGENT_CONTRACT=1` adds contract requests to the query cycle. It waits up
+to five minutes for enrichment before both the cold shutdown and warm load,
+checks persisted resolved callers against the generated source, and requires the
+known symbol plus positive impact in contract responses. Disabling mutations
+with `GORTEX_AGENT_MUTATIONS=0` applies the same readiness fence and strict detect
+validation, removing concurrent publication as a confounder. The idle writer
+proxy remains connected for the common cleanup path but sends no mutations.
+Missing resolution evidence fails the scenario; it cannot become a fast zero-blast
+success. `resolved_callers` is null when that fence was not requested.
+
+Repeat with `GORTEX_AGENT_PROFILE_KIND=cpu`, `mutex`, `block` or `trace` in separate
+artifact directories. The default is CPU. Each phase records one two-second
+profile of the selected kind; the first slow request also captures an immediate
+goroutine dump and a profile of that kind. Expensive captures serialize, so the
+slow profile can start after the baseline capture. The same trigger watches
+strict startup enrichment; `startup-1` and `startup-2` retain profiles and metrics
+while cold/warm readiness is still pending. A completed request's measured
+latency excludes waiting for its diagnostic capture. Mutex/block sampling is
+enabled only during the bounded capture, then restored/disabled by the diagnostic
+handler. Trace files use the `.pprof` suffix for artifact consistency but contain
+a Go execution trace: inspect them with `go tool trace`.
+
+Every mixed phase now saves `metrics-before.prom` and `metrics-after.prom` from a
+separate loopback-only endpoint on the private daemon. Slow captures add
+`slow-metrics-before.prom` and `slow-metrics-after.prom`. SQLite pool wait counts
+and wait durations are cumulative: compare their deltas, and check the sample's
+freshness before concluding there was no contention. They describe pool admission,
+not every SQLite lock wait. `response-change.detect-N.json` and optional
+`response-change.contract-N.json` preserve the first complete response per client,
+including returned graph status, actual affected counts and lower-bound markers.
+Do not interpret a bounded blast radius as the full number of callers.
+
+A previous short run stopped cold startup after symbols became searchable but
+before enrichment completed. On warm load, the generated calls remained
+unresolved and both operations returned zero dependents. Those early timings
+remain useful for transport diagnosis, not for dependency-walk performance.
+The stricter mode prevents that false conclusion. It does not establish the
+cause of a production stall unless the stall actually occurs in the run.
+
+## Contract count regression benchmark
+
+Profiles of the resolved high-fan-in fixture exposed full incoming-edge reads
+inside parameter counting and fan-in/out counting. Both now use the existing
+candidate-scoped `NodeFanAggregator` when available; other readers retain full
+adjacency reads. Counts preserve edge-kind filters, zero-degree map behavior,
+duplicate candidate multiplicity and orphan fallback. Tests compare memory and
+SQLite generation handles against full reads, and reject full hydration when a
+valid aggregate row exists.
+
+```sh
+GOTOOLCHAIN=go1.27.2 GOMAXPROCS=4 go test ./internal/mcp \
+  -run '^$' -bench '^BenchmarkContractParamCountHighFanIn$' \
+  -benchmem -benchtime=100ms -count=5 -cpu=4
+```
+
+This isolates parameter counting on one SQLite function with six parameters and
+20,000 callers. Its full-read and aggregate controls share the same database.
+It measures a helper, not whole-contract latency; use the transport scenario
+above to measure the complete request.
+
+One strict local run used 2,048 source files, 202,822 nodes, 1,056,963 edges and
+65,569 verified callers of the target. After replacing both full-read count paths,
+whole-contract medians changed from about 533 to 91 ms with one query client and
+770 to 168 ms with four. These phases contain only three/twelve contract samples;
+background load and profiling affect timings. They are diagnostic observations,
+not production SLOs. Cold startup including full enrichment took about two minutes;
+its sampled CPU profile showed resolver work and SQLite reads. The historical
+59-second MCP timeout was not reproduced, so its exact cause remains unknown.
 
 ## Connection cleanup and reconnect records
 

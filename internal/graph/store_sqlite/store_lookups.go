@@ -644,8 +644,12 @@ func toAnyArgs(ss []string) []any {
 	return args
 }
 
+// Replacer is immutable and safe for concurrent use. Reuse its lookup table
+// instead of rebuilding it for every substring search.
+var literalLikeEscaper = strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`)
+
 // escapeLikePattern escapes the LIKE metacharacters so the substring matches
 // literally under `... LIKE ? ESCAPE '\'`.
 func escapeLikePattern(s string) string {
-	return strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(s)
+	return literalLikeEscaper.Replace(s)
 }

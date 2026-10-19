@@ -20,6 +20,17 @@ func (s *Server) paramCount(ctx context.Context, id string) int {
 	if g == nil {
 		return 0
 	}
+	// Count only parameter edges on this node. Hydrating every incoming
+	// caller just to discard it makes contracts expensive for popular APIs.
+	if counter, ok := g.(graph.NodeFanAggregator); ok {
+		for _, row := range counter.NodeFanCounts([]string{id}, []graph.EdgeKind{graph.EdgeParamOf}, nil) {
+			if row.NodeID == id {
+				return row.FanIn
+			}
+		}
+		// Unknown nodes may still own orphan edges on a legacy reader;
+		// preserve the full-reader behavior when no aggregate row exists.
+	}
 	n := 0
 	for _, e := range g.GetInEdges(id) {
 		if e.Kind == graph.EdgeParamOf {

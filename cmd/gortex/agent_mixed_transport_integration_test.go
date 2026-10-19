@@ -58,6 +58,8 @@ type agentMixedPhase struct {
 type agentMixedRecorder struct {
 	parent      context.Context
 	root, addr  string
+	profileKind string
+	metricsAddr string
 	start       time.Time
 	slow        time.Duration
 	captured    atomic.Bool
@@ -65,6 +67,7 @@ type agentMixedRecorder struct {
 	mu          sync.Mutex
 	samples     []agentMixedSample
 	profileErrs []string
+	responses   sync.Map
 }
 
 // Profiles run while a slow request is still pending. The first slow/failing
@@ -74,10 +77,12 @@ func (r *agentMixedRecorder) capture(operation string) {
 		return
 	}
 	triggered := time.Since(r.start)
-	for _, profile := range []struct{ endpoint, filename string }{{"goroutine?debug=2", "slow-goroutines.txt"}, {"profile?seconds=2", "slow-cpu.pprof"}} {
+	r.captureMetrics("slow-metrics-before.prom")
+	kind := r.diagnosticKind()
+	for _, profile := range []struct{ endpoint, filename string }{{"goroutine?debug=2", "slow-goroutines.txt"}, {kind, "slow-" + kind + ".pprof"}} {
 		var err error
-		if strings.HasPrefix(profile.endpoint, "profile?") {
-			err = r.saveCPU(profile.filename)
+		if profile.endpoint == kind {
+			err = r.saveDiagnostic(profile.filename)
 		} else {
 			err = agentSaveProfile(r.parent, r.addr, profile.endpoint, filepath.Join(r.root, profile.filename))
 		}
@@ -87,7 +92,8 @@ func (r *agentMixedRecorder) capture(operation string) {
 			r.mu.Unlock()
 		}
 	}
-	data, err := json.Marshal(map[string]any{"operation": operation, "threshold_ms": r.slow.Milliseconds(), "started_ms": triggered.Milliseconds()})
+	r.captureMetrics("slow-metrics-after.prom")
+	data, err := json.Marshal(map[string]any{"operation": operation, "profile_kind": kind, "threshold_ms": r.slow.Milliseconds(), "started_ms": triggered.Milliseconds()})
 	if err == nil {
 		err = os.WriteFile(filepath.Join(r.root, "slow-request.json"), append(data, '\n'), 0600)
 	}
@@ -110,21 +116,9 @@ func (r *agentMixedRecorder) measure(client int, operation string, call func(con
 	ctx, cancel := context.WithTimeout(r.parent, 90*time.Second)
 	defer cancel()
 	begin := time.Now()
-	finished, watcherDone := make(chan struct{}), make(chan struct{})
-	go func() {
-		defer close(watcherDone)
-		timer := time.NewTimer(r.slow)
-		defer timer.Stop()
-		select {
-		case <-finished:
-		case <-ctx.Done():
-		case <-timer.C:
-			r.capture(operation)
-		}
-	}()
+	stopWatcher := r.watchSlow(ctx, operation)
 	err := call(ctx)
 	sample := agentMixedSample{Operation: operation, Client: client, StartedMS: float64(begin.Sub(r.start).Microseconds()) / 1000, ElapsedMS: float64(time.Since(begin).Microseconds()) / 1000}
-	close(finished)
 	if err != nil {
 		sample.Error = err.Error()
 		if len(sample.Error) > 4096 {
@@ -132,7 +126,7 @@ func (r *agentMixedRecorder) measure(client int, operation string, call func(con
 		}
 		r.capture(operation)
 	}
-	<-watcherDone
+	stopWatcher()
 	r.mu.Lock()
 	r.samples = append(r.samples, sample)
 	r.mu.Unlock()
@@ -252,6 +246,13 @@ func TestAgentMixedTransportIntegration(t *testing.T) {
 	files := agentMixedInt(t, "GORTEX_AGENT_FILES", 256, 32, 10000)
 	declarations := agentMixedInt(t, "GORTEX_AGENT_DECLARATIONS", 16, 2, 64)
 	rounds := agentMixedInt(t, "GORTEX_AGENT_ROUNDS", 24, 3, 1000)
+	contract := agentMixedInt(t, "GORTEX_AGENT_CONTRACT", 0, 0, 1) == 1
+	if contract {
+		require.GreaterOrEqual(t, rounds, 4, "contract mode needs a complete four-operation cycle")
+	}
+	mutations := agentMixedInt(t, "GORTEX_AGENT_MUTATIONS", 1, 0, 1) == 1
+	profileKind, err := agentDiagnosticKind(os.Getenv("GORTEX_AGENT_PROFILE_KIND"))
+	require.NoError(t, err)
 	clientList := os.Getenv("GORTEX_AGENT_MIXED_CLIENTS")
 	if clientList == "" {
 		clientList = "1,4,8"
@@ -277,7 +278,7 @@ func TestAgentMixedTransportIntegration(t *testing.T) {
 		require.LessOrEqual(t, slow, 30*time.Second)
 	}
 	f := newIssue767Fixture(t, binary)
-	f.env = append(f.env, "GORTEX_QUERY_LOG="+filepath.Join(f.root, "queries.jsonl"), "GORTEX_DAEMON_SOCKET="+filepath.Join(f.root, "daemon.sock"))
+	f.env = append(f.env, "GORTEX_QUERY_LOG="+filepath.Join(f.root, "queries.jsonl"), "GORTEX_DAEMON_SOCKET="+filepath.Join(f.root, "daemon.sock"), "OTEL_TRACES_EXPORTER=none")
 	for file := range files {
 		f.write(agentMixedPath(f.primary, file), agentMixedSource(file, declarations))
 	}
@@ -295,6 +296,8 @@ func TestAgentMixedTransportIntegration(t *testing.T) {
 	f.write(firstPath, firstSource)
 	f.write(mutationPath, agentMixedMutation(value))
 	addr := agentProfileAddress(t)
+	metricsAddr := agentProfileAddress(t)
+	f.env = append(f.env, "GORTEX_METRICS_ADDR="+metricsAddr)
 	for i, entry := range f.env {
 		if strings.HasPrefix(entry, "GORTEX_DAEMON_PPROF_ADDR=") {
 			f.env[i] = "GORTEX_DAEMON_PPROF_ADDR=" + addr
@@ -312,6 +315,7 @@ func TestAgentMixedTransportIntegration(t *testing.T) {
 			}
 		}
 	})
+	var resolvedCallers *int
 	startup := func() float64 {
 		begin := time.Now()
 		f.start()
@@ -333,6 +337,28 @@ func TestAgentMixedTransportIntegration(t *testing.T) {
 			found, fallback := issue767JSONEvidence(evidence, name)
 			return found && !fallback && agentJSONField(evidence, "absolute_file_path", agentMixedPath(f.primary, files-1)) && agentMixedRead(ctx, client, agentMixedPath(f.primary, files-1), agentMixedSource(files-1, declarations)) == nil
 		})
+		if contract || !mutations {
+			// A searchable symbol is not proof that dependency resolution
+			// finished. Do not restart cold startup before enrichment has
+			// published, or measure a zero-blast unresolved graph as fast.
+			startupRoot := filepath.Join(f.root, fmt.Sprintf("startup-%d", f.run))
+			require.NoError(t, os.MkdirAll(startupRoot, 0700))
+			recorder := &agentMixedRecorder{parent: t.Context(), root: startupRoot, addr: addr, metricsAddr: metricsAddr, profileKind: profileKind, start: time.Now(), slow: slow}
+			func() {
+				defer recorder.watchSlow(t.Context(), "startup.enrichment")()
+				f.await("isolated daemon enrichment complete", 5*time.Minute, func() bool {
+					return agentEnrichmentComplete(t.Context(), metricsAddr, filepath.Join(startupRoot, "metrics.prom"))
+				})
+			}()
+			require.Empty(t, recorder.profileErrs, "startup diagnostic capture failed")
+			graphDB := f.openReadOnly()
+			var resolved int
+			queryErr := graphDB.QueryRowContext(t.Context(), `SELECT COUNT(*) FROM edges WHERE kind = 'calls' AND to_id IN (SELECT id FROM nodes WHERE name = 'Issue767Target00' AND kind = 'function')`).Scan(&resolved)
+			require.NoError(t, graphDB.Close())
+			require.NoError(t, queryErr)
+			require.GreaterOrEqual(t, resolved, files*declarations, "diagnostic fixture must have resolved callers; a zero-blast graph cannot reproduce dependency-analysis stalls")
+			resolvedCallers = &resolved
+		}
 		return float64(time.Since(begin).Microseconds()) / 1000
 	}
 	cold := startup()
@@ -344,13 +370,18 @@ func TestAgentMixedTransportIntegration(t *testing.T) {
 	var nodes, edges int64
 	require.NoError(t, db.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM nodes").Scan(&nodes))
 	require.NoError(t, db.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM edges").Scan(&edges))
+	var contractTarget string
+	require.NoError(t, db.QueryRowContext(t.Context(), "SELECT id FROM nodes WHERE name = ? AND kind = ? LIMIT 1", "Issue767Target00", "function").Scan(&contractTarget))
 	require.NoError(t, db.Close())
 	// Prove the profiling endpoint belongs to a responsive private daemon before load.
 	agentCaptureProfile(t, f, addr, "goroutine?debug=2", "before-goroutines.txt")
 	var phases []agentMixedPhase
 	errors := 0
 	for _, count := range clients {
-		phase := agentMixedPhase{QueryClients: count, MutationClients: 1, RuntimeBefore: status().Raw}
+		phase := agentMixedPhase{QueryClients: count, RuntimeBefore: status().Raw}
+		if mutations {
+			phase.MutationClients = 1
+		}
 		pool := make([]*agentWireClient, count)
 		closers := make([]func(), count)
 		for i := range pool {
@@ -359,7 +390,12 @@ func TestAgentMixedTransportIntegration(t *testing.T) {
 		writer, closeWriter := f.agentClient(f.primary)
 		root := filepath.Join(f.root, fmt.Sprintf("clients-%d", count))
 		require.NoError(t, os.MkdirAll(root, 0700))
-		recorder := &agentMixedRecorder{parent: t.Context(), root: root, addr: addr, start: time.Now(), slow: slow}
+		recorder := &agentMixedRecorder{parent: t.Context(), root: root, addr: addr, profileKind: profileKind, metricsAddr: metricsAddr, start: time.Now(), slow: slow}
+		recorder.captureMetrics("metrics-before.prom")
+		operations := []string{"search", "read", "change.detect"}
+		if contract {
+			operations = append(operations, "change.contract")
+		}
 		start := make(chan struct{})
 		var wg sync.WaitGroup
 		for index, client := range pool {
@@ -368,7 +404,7 @@ func TestAgentMixedTransportIntegration(t *testing.T) {
 				defer wg.Done()
 				<-start
 				for round := range rounds {
-					operation := []string{"search", "read", "change.detect"}[(round+index)%3]
+					operation := operations[(round+index)%len(operations)]
 					err := recorder.measure(index, operation, func(ctx context.Context) error {
 						switch operation {
 						case "search":
@@ -376,10 +412,25 @@ func TestAgentMixedTransportIntegration(t *testing.T) {
 						case "read":
 							file := (round*31 + index*17) % files
 							return agentMixedRead(ctx, client, agentMixedPath(f.primary, file), agentMixedSource(file, declarations))
+						case "change.contract":
+							raw, err := client.tool(ctx, "change", map[string]any{"operation": "contract", "target": map[string]any{"symbols": []string{contractTarget}}, "output": map[string]any{"format": "json", "max_tokens": 3000}})
+							if err != nil {
+								return err
+							}
+							if err := recorder.recordResponse(index, operation, raw); err != nil {
+								return err
+							}
+							return agentValidateChangeEvidence(raw, contractTarget)
 						default:
 							raw, err := client.tool(ctx, "change", map[string]any{"operation": "detect", "source": map[string]any{"scope": "unstaged"}, "options": map[string]any{"repo": "issue767", "limit": 8}, "output": map[string]any{"format": "json", "max_tokens": 3000}})
 							if err != nil {
 								return err
+							}
+							if err := recorder.recordResponse(index, operation, raw); err != nil {
+								return err
+							}
+							if !mutations {
+								return agentValidateChangeEvidence(raw, contractTarget)
 							}
 							return agentMixedValidate(raw, "AgentMixedMutation")
 						}
@@ -394,6 +445,9 @@ func TestAgentMixedTransportIntegration(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			<-start
+			if !mutations {
+				return
+			}
 			for mutation := range max(2, rounds/6) {
 				transaction := fmt.Sprintf("mixed-%d-%d-%d", os.Getpid(), count, mutation)
 				err := recorder.measure(count, "edit.batch", func(ctx context.Context) error {
@@ -422,12 +476,13 @@ func TestAgentMixedTransportIntegration(t *testing.T) {
 			}
 		}()
 		profileDone := make(chan error, 1)
-		go func() { profileDone <- recorder.saveCPU("cpu.pprof") }()
+		go func() { profileDone <- recorder.saveDiagnostic(profileKind + ".pprof") }()
 		close(start)
 		wg.Wait()
 		if err := <-profileDone; err != nil {
 			recorder.profileErrs = append(recorder.profileErrs, err.Error())
 		}
+		recorder.captureMetrics("metrics-after.prom")
 		phase.WorkloadMS = float64(time.Since(recorder.start).Microseconds()) / 1000
 		phase.Samples, phase.ProfileErrors, phase.SlowProfile = recorder.samples, recorder.profileErrs, recorder.captured.Load()
 		sort.Slice(phase.Samples, func(i, j int) bool { return phase.Samples[i].StartedMS < phase.Samples[j].StartedMS })
@@ -454,14 +509,14 @@ func TestAgentMixedTransportIntegration(t *testing.T) {
 		writePhase() // Preserve completed requests even if cleanup fails.
 		summary, err := json.Marshal(phase.Operations)
 		require.NoError(t, err)
-		t.Logf("mixed phase query_clients=%d mutation_clients=1 backpressure=%d: %s", count, phase.BackpressureResponses, summary)
+		t.Logf("mixed phase query_clients=%d mutation_clients=%d backpressure=%d: %s", count, phase.MutationClients, phase.BackpressureResponses, summary)
 		f.await("mixed proxy sessions released", 2*time.Minute, func() bool { return status().SocketSessions == 1 })
 		phase.RuntimeAfter = status().Raw
 		phase.CleanupMS = float64(time.Since(cleanupBegin).Microseconds()) / 1000
 		writePhase()
 		phases = append(phases, phase)
 	}
-	data, err := json.MarshalIndent(map[string]any{"files": files, "declarations_per_file": declarations, "nodes": nodes, "edges": edges, "rounds": rounds, "cold_ms": cold, "warm_ms": warm, "slow_threshold_ms": slow.Milliseconds(), "errors": errors, "phases": phases}, "", "  ")
+	data, err := json.MarshalIndent(map[string]any{"files": files, "declarations_per_file": declarations, "nodes": nodes, "edges": edges, "rounds": rounds, "resolved_callers": resolvedCallers, "contract": contract, "mutations": mutations, "profile_kind": profileKind, "cold_ms": cold, "warm_ms": warm, "slow_threshold_ms": slow.Milliseconds(), "errors": errors, "phases": phases}, "", "  ")
 	require.NoError(t, err)
 	f.write(filepath.Join(f.root, "mixed-transport.json"), string(data)+"\n")
 	agentCaptureProfile(t, f, addr, "heap", "heap.pprof")

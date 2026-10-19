@@ -495,10 +495,19 @@ func (c *Context) prepare(cands []*Candidate) {
 	if c.Graph != nil && len(ids) > 0 {
 		missingOut := missingEdgeIDs(ids, c.outEdgeCache)
 		missingIn := missingEdgeIDs(ids, c.inEdgeCache)
+		fetchOut := c.Graph.GetOutEdgesByNodeIDs
+		fetchIn := c.Graph.GetInEdgesByNodeIDs
+		// Signals consume edge counts and similar_to metadata. Optional
+		// projections avoid hydrating unrelated payloads; overlays and
+		// other readers retain their ordinary view-aware fallback.
+		if projected, ok := c.Graph.(graph.RerankEdgeReader); ok {
+			fetchOut = projected.GetRerankOutEdgesByNodeIDs
+			fetchIn = projected.GetRerankInEdgesByNodeIDs
+		}
 		// Backfill — when the cache already covers everything, both
 		// missing slices are empty and no cgo round-trip fires.
 		if len(missingOut) > 0 {
-			fetched := c.Graph.GetOutEdgesByNodeIDs(missingOut)
+			fetched := fetchOut(missingOut)
 			if c.outEdgeCache == nil {
 				c.outEdgeCache = make(map[string][]*graph.Edge, len(fetched))
 			}
@@ -507,7 +516,7 @@ func (c *Context) prepare(cands []*Candidate) {
 			}
 		}
 		if len(missingIn) > 0 {
-			fetched := c.Graph.GetInEdgesByNodeIDs(missingIn)
+			fetched := fetchIn(missingIn)
 			if c.inEdgeCache == nil {
 				c.inEdgeCache = make(map[string][]*graph.Edge, len(fetched))
 			}

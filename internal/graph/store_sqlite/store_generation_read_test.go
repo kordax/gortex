@@ -370,6 +370,17 @@ func genReadProbeQualNames() []string {
 //nolint:gocyclo // one entry per read; the length is the coverage.
 func generationReadProbes() []genProbe {
 	return []genProbe{
+		{name: "RerankEdges", run: func(t *testing.T, s *Store) []string {
+			var out []string
+			for _, edges := range []map[string][]*graph.Edge{s.GetRerankOutEdgesByNodeIDs(genReadProbeIDs()), s.GetRerankInEdgesByNodeIDs(genReadProbeIDs())} {
+				for _, es := range edges {
+					for _, e := range es {
+						out = append(out, fmt.Sprintf("%s|%s|%s|%s", e.From, e.To, e.Kind, e.FilePath))
+					}
+				}
+			}
+			return out
+		}},
 		{name: "GetNode", run: func(t *testing.T, s *Store) []string {
 			return nodeTokens([]*graph.Node{s.GetNode(genReadShared), s.GetNode(genOnlyID(genZeroMark)), s.GetNode(genOnlyID(genOneMark))})
 		}},
@@ -1797,6 +1808,7 @@ func generationCapabilityChecklist() []capabilityCase {
 		{iface: (*graph.RefFactsWriter)(nil), skip: skipSidecar},
 		{iface: (*graph.ReleaseEnrichmentReader)(nil), skip: skipSidecar},
 		{iface: (*graph.ReleaseEnrichmentWriter)(nil), skip: skipSidecar},
+		{iface: (*graph.RerankEdgeReader)(nil), probe: "RerankEdges"},
 		{iface: (*graph.RepoCapabilityEdgeScanner)(nil), probe: "ScanRepoCapabilityEdges"},
 		{iface: (*graph.RepoEdgeKindReader)(nil), probe: "RepoProjections"},
 		{iface: (*graph.RepoFilePathReader)(nil), probe: "RepoProjections"},

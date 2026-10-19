@@ -467,14 +467,43 @@ func applyWinnowPrefilter(nodes []*graph.Node, c winnowConstraints) []*graph.Nod
 	return out
 }
 
-// computeFanInOut walks incoming and outgoing edges for each candidate and
-// counts fan-in (calls + references) and fan-out (calls). Scoped to the
-// candidate set so cost scales with |candidates|, not total graph size.
+// computeFanInOut counts fan-in (calls + references) and fan-out (calls).
+// Prefer a candidate-scoped aggregate so high-degree symbols do not require
+// hydrating every caller. Readers without it retain the full-edge fallback.
 func computeFanInOut(g graph.Reader, nodes []*graph.Node) (map[string]int, map[string]int) {
 	fanIn := make(map[string]int, len(nodes))
 	fanOut := make(map[string]int, len(nodes))
 	if g == nil {
 		return fanIn, fanOut
+	}
+	if counter, ok := g.(graph.NodeFanAggregator); ok && len(nodes) > 0 {
+		ids := make([]string, 0, len(nodes))
+		multiplicity := make(map[string]int, len(nodes))
+		for _, n := range nodes {
+			ids = append(ids, n.ID)
+			multiplicity[n.ID]++
+		}
+		known := make(map[string]bool, len(nodes))
+		for _, row := range counter.NodeFanCounts(ids, []graph.EdgeKind{graph.EdgeCalls, graph.EdgeReferences}, []graph.EdgeKind{graph.EdgeCalls}) {
+			if count := multiplicity[row.NodeID]; count > 0 {
+				known[row.NodeID] = true
+				if row.FanIn > 0 {
+					fanIn[row.NodeID] = row.FanIn * count
+				}
+				if row.FanOut > 0 {
+					fanOut[row.NodeID] = row.FanOut * count
+				}
+			}
+		}
+		// Preserve legacy orphan-edge behavior for IDs absent from nodes;
+		// the SQL aggregate deliberately omits those rows.
+		var missing []*graph.Node
+		for _, n := range nodes {
+			if !known[n.ID] {
+				missing = append(missing, n)
+			}
+		}
+		nodes = missing
 	}
 	for _, n := range nodes {
 		for _, e := range g.GetInEdges(n.ID) {
