@@ -4,9 +4,9 @@ This fork has independent versions and updates at [kordax/gortex](https://github
 
 `gortex version` identifies the binary with `fork by kordax`, the fork repository, version and commit. Check `command -v gortex` too: an older installation earlier in `PATH` can still win. A running daemon keeps its previous executable until explicitly restarted.
 
-## Current release: v1.1.0
+## Current release: v1.2.0
 
-This release adds daemon monitoring, opt-in Prometheus metrics, OpenTelemetry tracing, bounded profiles and performance benchmarks. It includes a locally built static Linux amd64 archive and Debian package. Other platforms, cosign signatures and SLSA attestations are not included. Local checks are required before publication; GitHub CI is not awaited for this maintainer-requested manual release.
+This release adds a local dashboard at `http://127.0.0.1:9474` with bounded 24-hour metrics history, reduces incremental graph update work and repairs derived relationships after file replacement. Prometheus metrics, OpenTelemetry tracing and bounded profiles remain available. It includes a locally built static Linux amd64 archive and Debian package. Other platforms, cosign signatures and SLSA attestations are not included. Local checks are required before publication; GitHub CI is not awaited for this maintainer-requested manual release.
 
 Install the latest published release into `~/.local/bin` from this checkout:
 
@@ -16,9 +16,9 @@ sh scripts/install.sh
 gortex version
 ```
 
-The installer resolves the latest fork tag and verifies SHA-256. If cosign is installed, it also requires workflow signatures and refuses unsigned manual releases. Keep verification enabled; use the trusted-binary procedure below for an explicitly trusted manual build, substituting `v1.1.0` for `v1.0.0`.
+The installer resolves the latest fork tag and verifies SHA-256. If cosign is installed, it also requires workflow signatures and refuses unsigned manual releases. Keep verification enabled; use the trusted-binary procedure below for an explicitly trusted manual build, substituting `v1.2.0` for `v1.0.0`.
 
-For Debian or Ubuntu, download `gortex_linux_amd64.deb` from [v1.1.0](https://github.com/kordax/gortex/releases/tag/v1.1.0), verify it against `checksums.txt`, then install:
+For Debian or Ubuntu, download `gortex_linux_amd64.deb` from [v1.2.0](https://github.com/kordax/gortex/releases/tag/v1.2.0), verify it against `checksums.txt`, then install:
 
 ```sh
 sudo apt install ./gortex_linux_amd64.deb
