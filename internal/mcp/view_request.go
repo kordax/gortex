@@ -49,6 +49,9 @@ type requestView struct {
 	// routed checkout's root. Empty for a view of a committed tree, which is
 	// the whole difference a filesystem-backed capability turns on.
 	viewRoot string
+	// repoPrefix identifies a dedicated checkout whose corpus needs no
+	// materialized route. Keep its filesystem root confined to this repository.
+	repoPrefix string
 	// suppressBufferOverlay is set only for an unavailable checkout's
 	// primary-base fallback. Grace answers must exclude both persisted dirty
 	// state and session buffers; a normal cold-build fallback may still compose
@@ -692,6 +695,38 @@ func (s *Server) viewForWorktreeSelector(
 	}
 	if err := s.checkoutInSessionScope(ctx, checkout); err != nil {
 		return nil, err
+	}
+	if checkout.EffectiveMode == store_sqlite.CheckoutModeDedicated {
+		// Dedicated checkouts already own an indexed corpus and intentionally
+		// have no automatic route. Waiting for one would return view_building
+		// forever: activation only builds automatic checkout routes.
+		graphs, err := s.materializer.Catalog.ListDedicatedGraphs(ctx, checkout.FamilyID)
+		if err != nil {
+			return nil, graphview.WrapViewError(graphview.CodeCheckoutInaccessible,
+				fmt.Sprintf("read the graph of checkout %q", checkout.CheckoutID), err)
+		}
+		for _, dedicated := range graphs {
+			if dedicated.OwnerCheckoutID != checkout.CheckoutID {
+				continue
+			}
+			if dedicated.GraphID == "" || dedicated.RepoPrefix == "" {
+				break
+			}
+			if err := s.repoPrefixInSessionScope(ctx, dedicated.RepoPrefix, checkout.CheckoutID); err != nil {
+				return nil, err
+			}
+			if dedicated.State != reconcile.GraphStateReady {
+				return nil, graphview.NewViewError(graphview.CodeViewBuilding,
+					fmt.Sprintf("graph %q is %s", dedicated.GraphID, dedicated.State))
+			}
+			rider := graphview.NewViewRider(selector)
+			rider.MarkExact(selector.String())
+			rider.GraphID = dedicated.GraphID
+			rider.CheckoutID = checkout.CheckoutID
+			return &requestView{rider: rider, viewRoot: checkout.RootPath, repoPrefix: dedicated.RepoPrefix}, nil
+		}
+		return nil, graphview.NewViewError(graphview.CodeCheckoutInaccessible,
+			fmt.Sprintf("dedicated checkout %q has no registered graph", checkout.CheckoutID))
 	}
 	if _, err := s.familyPrimary(ctx, checkout.FamilyID); err != nil {
 		return nil, err

@@ -91,10 +91,13 @@ func viewCheckoutID(view *requestView) string {
 }
 
 func viewRepoPrefix(view *requestView) string {
-	if view == nil || view.materialized == nil {
+	if view == nil {
 		return ""
 	}
-	return view.materialized.ID.RepoPrefix
+	if view.materialized != nil {
+		return view.materialized.ID.RepoPrefix
+	}
+	return view.repoPrefix
 }
 
 // stampRepoPrefix spells a checkout searcher's repo-relative match paths the
