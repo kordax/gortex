@@ -100,8 +100,22 @@ func (d *mcpDispatcher) Dispatch(ctx context.Context, sess *daemon.Session, fram
 	// a client session must wait until admission has succeeded.
 	ctx = gortexmcp.WithSessionID(ctx, sess.ID)
 	ctx = gortexmcp.WithSessionCWD(ctx, sess.CWD)
+	// Sample readiness before registry discovery: a miss observed during
+	// warmup must not turn into a confirmed miss if ready flips mid-probe.
+	phase, ready := d.srv.ReadinessPhase()
 	reachable, admissionErr := d.cwdReachableChecked(ctx, sess.CWD)
 	untracked := sess.CWD != "" && !reachable && admissionErr == nil
+	var discoveryPhase string
+	if untracked && phase != "" && !ready {
+		// The registry is populated during warmup. Its current absence is
+		// insufficient evidence that this cwd needs tracking. Keep admission
+		// closed, but let the same session retry after discovery completes.
+		discoveryPhase = phase
+		untracked = false
+	}
+	if discoveryPhase != "" && !checkoutAdmissionMetadataMethod(peekFrameMethod(frame)) {
+		return warmupAdmissionError(sess.CWD, discoveryPhase, frame), nil
+	}
 	if admissionErr != nil && !checkoutAdmissionMetadataMethod(peekFrameMethod(frame)) {
 		return checkoutAdmissionError(sess.CWD, frame, admissionErr), nil
 	}
@@ -198,7 +212,58 @@ func (d *mcpDispatcher) Dispatch(ctx context.Context, sess *daemon.Session, fram
 	if admissionErr != nil {
 		out = rewriteCheckoutAdmissionResponse(peekFrameMethod(frame), out, sess.CWD, admissionErr)
 	}
+	if discoveryPhase != "" {
+		out = rewriteWarmupAdmissionResponse(peekFrameMethod(frame), out, sess.CWD, discoveryPhase)
+	}
 	return out, nil
+}
+
+// warmupAdmissionError distinguishes an incomplete registry from a confirmed
+// tracking miss. No graph or configuration operation is admitted on this path.
+func warmupAdmissionError(cwd, phase string, inbound []byte) []byte {
+	var req struct {
+		ID json.RawMessage `json:"id"`
+	}
+	_ = json.Unmarshal(inbound, &req)
+	out, _ := json.Marshal(map[string]any{
+		"jsonrpc": "2.0",
+		"id":      req.ID,
+		"error": map[string]any{
+			"code":    -32000,
+			"message": "daemon warming up: repository discovery is not complete",
+			"data": map[string]any{
+				"error_code":     "daemon_warming_up",
+				"path":           cwd,
+				"phase":          phase,
+				"retryable":      true,
+				"retry_after_ms": 1000,
+			},
+		},
+	})
+	return out
+}
+
+func rewriteWarmupAdmissionResponse(method string, out []byte, cwd, phase string) []byte {
+	if method != "initialize" {
+		return out
+	}
+	var reply map[string]any
+	if json.Unmarshal(out, &reply) != nil {
+		return out
+	}
+	result, ok := reply["result"].(map[string]any)
+	if !ok {
+		return out
+	}
+	result["instructions"] = fmt.Sprintf(
+		"Gortex is warming up (%s). Repository discovery for %s has not completed. "+
+			"Graph access is temporarily unavailable. Retry in this session after warmup; do not change tracking configuration during discovery.",
+		phase, cwd)
+	updated, err := json.Marshal(reply)
+	if err != nil {
+		return out
+	}
+	return updated
 }
 
 // peekFrameMethod extracts the JSON-RPC method from a raw frame, or "" when it
