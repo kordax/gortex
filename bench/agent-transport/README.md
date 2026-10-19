@@ -94,6 +94,37 @@ Excluded or unindexed test files yield unknown evidence, rather than proving no
 tests exist. Import a runtime coverage profile when execution coverage is needed;
 the project's test-file exclusion is intentionally retained.
 
+## Adversarial regression suite
+
+```sh
+bash scripts/test-agent-regressions.sh
+```
+
+These deterministic cases also run once in the ordinary Go suite. The script
+repeats them five times with the race detector and shuffled test order. It prints
+the seed and retains the test log. Set `GORTEX_AGENT_REGRESSION_REPEAT` (1 to 99),
+`GORTEX_AGENT_REGRESSION_SEED` or `GORTEX_AGENT_REGRESSION_ARTIFACT_DIR` to reproduce
+a run. All repositories, journals, databases and child processes are private test
+fixtures. The script does not install a binary or contact the working daemon.
+
+| Area | Invariant |
+| --- | --- |
+| Startup admission | Sixteen readiness/discovery combinations, repeated requests, cancellation and concurrent sessions cannot execute an unadmitted handler; the same session recovers when metadata becomes available. |
+| Crash recovery | All 81 before/after/unrelated combinations for an edit, deletion and move produce a complete commit, complete rollback or an explicit conflict that preserves unrelated state. Terminal replay survives another restart. |
+| Process termination | A separate test process exits without defers at four journal/write boundaries; a new server recovers from the persisted journal. This tests process interruption, not power loss or storage hardware guarantees. |
+| Competing retries | Twelve cancelled retries cannot cancel or replay their owner. A conflicting payload is refused, an overlapping request honours its deadline, and an independent file remains writable. |
+| Checkout lifecycle | Real Git branch/HEAD changes, a parser held during publication, and checkout disappearance/return preserve selected-view identity and scope. Publication replaces old symbols after the parser resumes. |
+
+`exact` identifies the selected view. It does not alone prove that graph indexing
+has caught up with current filesystem bytes. The publication test checks both
+the readable previous generation during a rebuild and the new graph after it.
+Only use freshness options supported by the specific tool's schema.
+
+These tests target combinations and failure boundaries, not a line-coverage
+percentage. They do not claim exhaustive filesystem interleavings or production
+latency guarantees. Use the transport scenario separately for real framing,
+sockets, reconnects and profiles.
+
 ## Mixed workload with a normal binary
 
 ```bash
