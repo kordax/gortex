@@ -8,6 +8,7 @@ Gortex is a Go CLI, MCP server and daemon backed by a code graph. Keep changes f
 - Work autonomously through implementation and local verification. Use one agent for ordinary tasks; delegate only substantial independent work, with disjoint file ownership.
 - Follow the active Gortex tooling instructions for indexed source. Scope queries to this repository and reuse established paths/evidence. Read only what the task needs.
 - Never reset or clean the working tree, overwrite another session's edits, publish, or deploy without the corresponding request.
+- For every release, update `version` in `cmd/gortex/main.go`. It is the source version used by local builds. Before tagging, verify that this value, the intended Git tag and the built binary's version agree. Preserve commit and dirty metadata so local changes remain identifiable.
 - Development and load tests use temporary repositories, private XDG directories/SQLite storage, and isolated processes. Do not load the maintainer's real projects, restart the working daemon, delete its store, or re-track repositories to test a change.
 
 ## Where to work
@@ -51,4 +52,4 @@ For real MCP transport load, run `bash scripts/test-agent-transport.sh`; see [th
 
 `bash scripts/install-local.sh` builds the current checkout, including dirty source, and atomically installs into `~/.local/bin`, retaining `gortex.previous`. `--rollback` swaps the last two binaries. It does not restart the daemon or change configuration.
 
-Test installation with a disposable `GORTEX_INSTALL_DIR`, never the maintainer's real executable. `--dry-run` builds/validates without changing the destination; `--binary PATH` installs a trusted prebuilt binary. The existing `scripts/install.sh` downloads an upstream release and may restart the daemon, so it is not the installer for local fixes.
+Test installation with a disposable `GORTEX_INSTALL_DIR`, never the maintainer's real executable. `--dry-run` builds/validates without changing the destination; `--binary PATH` installs a trusted prebuilt binary. The existing `scripts/install.sh` downloads a published fork release and may restart the daemon, so it is not the installer for unpublished local fixes.
