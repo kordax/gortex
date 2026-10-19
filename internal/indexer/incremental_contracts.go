@@ -12,8 +12,8 @@ import (
 )
 
 // refreshContractsForFiles re-extracts only the exact changed-file frontier.
-// It returns whether the effective contract set changed and whether a
-// conservative full-repo fallback was required.
+// It returns whether contract records or their persisted ownership need
+// reconciliation and whether a conservative full-repo fallback was required.
 const contractFrontierReadBatchSize = 128
 
 type contractRefreshResult struct {
@@ -71,7 +71,7 @@ func (idx *Indexer) refreshContractsForFiles(files []string) contractRefreshResu
 			if preservePrior {
 				continue
 			}
-			if !contractSetsEqual(prior, fresh) {
+			if !contractSetsEqual(prior, fresh) || !contractOwnerRowsPresent(fresh, nodesByFile[graphPath], edgesByNode) {
 				result.addFrontier(prior, fresh)
 				for _, contract := range prior {
 					if contract.ID != "" {
@@ -98,6 +98,65 @@ func (idx *Indexer) refreshContractsForFiles(files []string) contractRefreshResu
 		idx.commitIncrementalContractFiles(reg, changedFiles, priorIDs)
 	}
 	return result
+}
+
+// File publication can remove owner edges while leaving the in-memory
+// registry unchanged. Equal extracted records still need to be re-emitted in
+// that case. Reuse the exact frontier already loaded for extraction, and never
+// invent an owner that contractGraphRows itself would reject.
+func contractOwnerRowsPresent(records []contracts.Contract, fileNodes []*graph.Node, edgesByNode map[string][]*graph.Edge) bool {
+	if len(records) == 0 {
+		return true
+	}
+	nodes := make(map[string]*graph.Node, len(fileNodes))
+	for _, node := range fileNodes {
+		if node != nil {
+			nodes[node.ID] = node
+		}
+	}
+	ownerEdges := make(map[string]map[graph.EdgeIdentity]struct{})
+	for _, record := range records {
+		ownerID := ""
+		if record.SymbolID != "" {
+			if node := nodes[record.SymbolID]; node != nil && node.RepoPrefix == record.RepoPrefix {
+				ownerID = node.ID
+			}
+		} else {
+			for _, node := range fileNodes {
+				if node != nil && node.Kind == graph.KindFile && node.FilePath == record.FilePath && node.RepoPrefix == record.RepoPrefix && (ownerID == "" || node.ID < ownerID) {
+					ownerID = node.ID
+				}
+			}
+		}
+		if ownerID == "" {
+			continue
+		}
+		kind := graph.EdgeProvides
+		if record.Role == contracts.RoleConsumer {
+			kind = graph.EdgeConsumes
+		}
+		kinds := []graph.EdgeKind{kind}
+		if record.SymbolID != "" && record.Role == contracts.RoleProvider && isRouteContractType(record.Type) {
+			kinds = append(kinds, graph.EdgeHandlesRoute)
+		}
+		present := ownerEdges[ownerID]
+		if present == nil {
+			present = make(map[graph.EdgeIdentity]struct{}, len(edgesByNode[ownerID]))
+			for _, edge := range edgesByNode[ownerID] {
+				if edge != nil {
+					present[graph.EdgeIdentityFor(edge)] = struct{}{}
+				}
+			}
+			ownerEdges[ownerID] = present
+		}
+		for _, kind := range kinds {
+			expected := graph.EdgeIdentityFor(&graph.Edge{From: ownerID, To: record.ID, Kind: kind, FilePath: record.FilePath, Line: record.Line})
+			if _, found := present[expected]; !found {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 func (idx *Indexer) isIncrementalContractManifest(absPath string) bool {

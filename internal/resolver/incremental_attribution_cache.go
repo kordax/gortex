@@ -6,9 +6,9 @@ import (
 	"github.com/zzet/gortex/internal/graph"
 )
 
-// prepareIncrementalAttributionCache expands the preloaded changed-file
-// frontier with same-package nodes in one multi-path read. The six scoped
-// attribution passes reuse this cache instead of repeating file-node queries.
+// prepareIncrementalAttributionCache reuses the preloaded changed-file
+// frontier across the scoped attribution passes. Package function candidates
+// are loaded separately only when dataflow binding needs a sibling lookup.
 func (r *Resolver) prepareIncrementalAttributionCache(frontier incrementalFileFrontier) {
 	r.incrementalNodesByFile = make(map[string][]*graph.Node, len(frontier.nodesByFile))
 	for _, path := range frontier.paths {
@@ -17,28 +17,7 @@ func (r *Resolver) prepareIncrementalAttributionCache(frontier incrementalFileFr
 		r.incrementalNodesByFile[path] = frontier.nodesByFile[path]
 	}
 	r.incrementalOutByNode = frontier.outByNode
-
-	missingSet := make(map[string]struct{})
-	for _, path := range frontier.paths {
-		for _, fileNode := range r.dirIndex[filePathDir(path)] {
-			if fileNode.FilePath == "" {
-				continue
-			}
-			if _, cached := r.incrementalNodesByFile[fileNode.FilePath]; !cached {
-				missingSet[fileNode.FilePath] = struct{}{}
-			}
-		}
-	}
-	missing := make([]string, 0, len(missingSet))
-	for path := range missingSet {
-		missing = append(missing, path)
-	}
-	if len(missing) > 0 {
-		fetched := r.graph.GetFileNodesByPaths(missing)
-		for _, path := range missing {
-			r.incrementalNodesByFile[path] = fetched[path]
-		}
-	}
+	r.incrementalCalleeByDir = nil
 }
 
 // runFileAttributionPassesForFilesLocked preserves the whole-graph pass order
@@ -106,6 +85,7 @@ func (r *Resolver) clearIncrementalAttributionCache() {
 	r.flushIncrementalAttributionReindexes()
 	r.incrementalNodesByFile = nil
 	r.incrementalOutByNode = nil
+	r.incrementalCalleeByDir = nil
 }
 
 func (r *Resolver) persistAttributionReindexes(batch []graph.EdgeReindex) {

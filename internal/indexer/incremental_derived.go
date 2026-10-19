@@ -12,8 +12,8 @@ import (
 )
 
 // IncrementalDerivedReport exposes the work selected by the changed-file
-// invalidation plans. It is intentionally count-only so telemetry remains
-// bounded even for a large workspace.
+// invalidation plans. Counts and per-family timings keep telemetry bounded even
+// for a large workspace; durations exclude waiting for the topology writer.
 type IncrementalDerivedReport struct {
 	Repos          int
 	Files          int
@@ -46,6 +46,15 @@ type IncrementalDerivedReport struct {
 	CrossRepo              int
 	Contracts              int
 	DurationMs             int64
+	ImplementsDuration     time.Duration
+	OverridesDuration      time.Duration
+	TestsDuration          time.Duration
+	EntryPointsDuration    time.Duration
+	CapabilityDuration     time.Duration
+	FrameworkDuration      time.Duration
+	ExternalCallsDuration  time.Duration
+	CrossRepoDuration      time.Duration
+	ContractsDuration      time.Duration
 }
 
 // runStandaloneIncrementalDerivedPasses reuses the exact MultiIndexer derived
@@ -221,14 +230,21 @@ func (mi *MultiIndexer) runIncrementalDerivedPassesTopologyHeld(
 	}
 	mi.mu.RUnlock()
 
-	if merged.Flags.Has(DerivedInvalidatesDeclarations) && len(merged.TypeIDs) > 0 {
+	// Structural file publication replaces type nodes and retires their derived
+	// edges even when declaration fingerprints are unchanged. Restore the exact
+	// type frontier after body edits too; metadata-only refreshes carry no types.
+	if len(merged.TypeIDs) > 0 {
 		typeFrontier := make(map[string]bool, len(merged.TypeIDs))
 		for _, id := range merged.TypeIDs {
 			typeFrontier[id] = true
 		}
 		r := resolver.New(mi.graph)
+		phase := time.Now()
 		report.Implements = r.InferImplementsScoped(typeFrontier, typeFrontier)
+		report.ImplementsDuration = time.Since(phase)
+		phase = time.Now()
 		report.Overrides = r.InferOverridesScoped(typeFrontier)
+		report.OverridesDuration = time.Since(phase)
 	}
 
 	// The resolution step of this same apply may have bound pending calls
@@ -237,9 +253,21 @@ func (mi *MultiIndexer) runIncrementalDerivedPassesTopologyHeld(
 	// only). Drain that retargeted frontier and reconcile those callers
 	// regardless of plan flags — without it a call that resolves later
 	// than its projection pass never gains its EdgeTests.
+	// Fingerprints select semantically changed families; publication also
+	// retires unchanged derived edges owned by replaced nodes. Restore those
+	// exact files without promoting metadata-only siblings to runtime work.
+	restoreRuntime := len(merged.ReplacedFiles) > 0
+	runtimeFiles := merged.Files
+	if !merged.Flags.Has(DerivedInvalidatesRuntime) {
+		runtimeFiles = merged.ReplacedFiles
+	}
+	phase := time.Now()
 	retargeted := mi.drainRetargetedTestCallFiles(prefixSet)
-	if merged.Flags.Has(DerivedInvalidatesRuntime) || merged.Flags.Has(DerivedInvalidatesTests) {
+	if merged.Flags.Has(DerivedInvalidatesRuntime) || merged.Flags.Has(DerivedInvalidatesTests) || restoreRuntime {
 		files := merged.Files
+		if !merged.Flags.Has(DerivedInvalidatesRuntime) && !merged.Flags.Has(DerivedInvalidatesTests) {
+			files = merged.ReplacedFiles
+		}
 		if len(files) > 0 && len(retargeted) > 0 {
 			files = appendUniqueSorted(append([]string(nil), files...), retargeted...)
 		}
@@ -247,26 +275,36 @@ func (mi *MultiIndexer) runIncrementalDerivedPassesTopologyHeld(
 	} else if len(retargeted) > 0 {
 		report.TestSymbols, report.TestEdges = markTestSymbolsAndEmitEdgesScoped(mi.graph, scopedPrefixes, retargeted...)
 	}
-	if merged.Flags.Has(DerivedInvalidatesDeclarations) && len(merged.TypeIDs) > 0 {
-		// A save that adds/re-parents a type can hang a new derived type
-		// off a stamped hierarchy (or stamp a new base); the changed-type
-		// frontier drives seed discovery, like the scoped passes above.
+	report.TestsDuration = time.Since(phase)
+	if len(merged.TypeIDs) > 0 {
+		// Replaced nodes also lose inherited entry-point stamps. The exact
+		// type frontier restores them on both declaration and body edits.
+		phase = time.Now()
 		report.EntryPointHierarchy = entrypoints.PropagateEntryPointsDownHierarchyScoped(mi.graph, merged.TypeIDs)
+		report.EntryPointsDuration = time.Since(phase)
 	}
-	if merged.Flags.Has(DerivedInvalidatesRuntime) {
-		readsEnv, execProc, fields := synthesizeCapabilityEdgesScoped(mi.graph, scopedPrefixes, merged.Files...)
+	if merged.Flags.Has(DerivedInvalidatesRuntime) || restoreRuntime {
+		phase = time.Now()
+		readsEnv, execProc, fields := synthesizeCapabilityEdgesScoped(mi.graph, scopedPrefixes, runtimeFiles...)
 		report.Capability = readsEnv + execProc + fields
+		report.CapabilityDuration = time.Since(phase)
 	}
 	if merged.Flags.Has(DerivedInvalidatesDeclarations) ||
 		merged.Flags.Has(DerivedInvalidatesImports) ||
-		merged.Flags.Has(DerivedInvalidatesRuntime) {
+		merged.Flags.Has(DerivedInvalidatesRuntime) || restoreRuntime {
+		frameworkFiles := merged.Files
+		if !merged.Flags.Has(DerivedInvalidatesDeclarations) && !merged.Flags.Has(DerivedInvalidatesImports) && !merged.Flags.Has(DerivedInvalidatesRuntime) {
+			frameworkFiles = merged.ReplacedFiles
+		}
+		phase = time.Now()
 		framework := resolver.RunFrameworkSynthesizersScopedForFilesWithSelection(
 			mi.graph,
 			scopedPrefixes,
-			merged.Files,
+			frameworkFiles,
 			merged.CSharpHierarchyChanged,
 			mi.frameworkSynthesizerSelection(scopedPrefixes),
 		)
+		report.FrameworkDuration = time.Since(phase)
 		report.Framework = framework.Total
 		report.FrameworkPer = framework.Per
 		report.FrameworkGated = framework.Gated
@@ -278,13 +316,19 @@ func (mi *MultiIndexer) runIncrementalDerivedPassesTopologyHeld(
 		report.FrameworkDemoteMs = framework.DemoteMillis
 		report.FrameworkScopeRows = framework.ScopeRows
 		report.FrameworkScopeBytes = framework.ScopeBytes
+		phase = time.Now()
 		report.ExternalCalls = resolver.SynthesizeExternalCallsForFiles(
-			mi.graph, mi.externalCallSynthesisEnabled(), merged.Files,
+			mi.graph, mi.externalCallSynthesisEnabled(), frameworkFiles,
 		)
-		report.CrossRepo = resolver.DetectCrossRepoEdgesForFiles(mi.graph, merged.Files)
+		report.ExternalCallsDuration = time.Since(phase)
+		phase = time.Now()
+		report.CrossRepo = resolver.DetectCrossRepoEdgesForFiles(mi.graph, frameworkFiles)
+		report.CrossRepoDuration = time.Since(phase)
 	}
 	if merged.Flags.Has(DerivedInvalidatesContracts) {
+		phase = time.Now()
 		report.Contracts = mi.ReconcileContractEdgesForFrontier(merged)
+		report.ContractsDuration = time.Since(phase)
 	}
 
 	report.DurationMs = time.Since(started).Milliseconds()
@@ -296,6 +340,7 @@ func (mi *MultiIndexer) logIncrementalDerived(report IncrementalDerivedReport, p
 	mi.logger.Info("incremental derived passes complete",
 		zap.Int("repos", report.Repos),
 		zap.Int("files", report.Files),
+		zap.Int("replaced_files", len(plan.ReplacedFiles)),
 		zap.Int("type_ids", report.TypeIDs),
 		zap.Uint32("flags", uint32(plan.Flags)),
 		zap.Bool("legacy_fallback", report.LegacyFallback),
@@ -322,5 +367,14 @@ func (mi *MultiIndexer) logIncrementalDerived(report IncrementalDerivedReport, p
 		zap.Int("external_calls", report.ExternalCalls),
 		zap.Int("cross_repo_edges", report.CrossRepo),
 		zap.Int("contract_edges", report.Contracts),
+		zap.Int64("implements_ms", report.ImplementsDuration.Milliseconds()),
+		zap.Int64("overrides_ms", report.OverridesDuration.Milliseconds()),
+		zap.Int64("tests_ms", report.TestsDuration.Milliseconds()),
+		zap.Int64("entrypoints_ms", report.EntryPointsDuration.Milliseconds()),
+		zap.Int64("capability_ms", report.CapabilityDuration.Milliseconds()),
+		zap.Int64("framework_ms", report.FrameworkDuration.Milliseconds()),
+		zap.Int64("external_calls_ms", report.ExternalCallsDuration.Milliseconds()),
+		zap.Int64("cross_repo_ms", report.CrossRepoDuration.Milliseconds()),
+		zap.Int64("contracts_ms", report.ContractsDuration.Milliseconds()),
 		zap.Int64("duration_ms", report.DurationMs))
 }

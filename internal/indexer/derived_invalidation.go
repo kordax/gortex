@@ -52,10 +52,15 @@ type DerivedInvalidationPlan struct {
 	InertFiles             int                      `json:"inert_files,omitempty"`
 	LegacyFallback         bool                     `json:"legacy_fallback,omitempty"`
 	CSharpHierarchyChanged bool                     `json:"csharp_hierarchy_changed,omitempty"`
+
+	// ReplacedFiles lost incident derived edges during structural publication
+	// or removal, even when a family's semantic fingerprint did not change.
+	// Metadata-only refreshes preserve those edges and leave this frontier empty.
+	ReplacedFiles []string `json:"replaced_files,omitempty"`
 }
 
 func (p DerivedInvalidationPlan) Empty() bool {
-	return p.Flags == 0 && len(p.Files) == 0 && len(p.ContractGroups) == 0 &&
+	return p.Flags == 0 && len(p.Files) == 0 && len(p.ReplacedFiles) == 0 && len(p.ContractGroups) == 0 &&
 		len(p.ContractSymbolIDs) == 0 && len(p.ContractBridgeNodeIDs) == 0 &&
 		p.BodyOnlyFiles == 0 && p.MetadataOnlyFiles == 0 && p.InertFiles == 0 &&
 		!p.CSharpHierarchyChanged
@@ -72,6 +77,7 @@ func (p *DerivedInvalidationPlan) Merge(other DerivedInvalidationPlan) {
 	p.LegacyFallback = p.LegacyFallback || other.LegacyFallback
 	p.CSharpHierarchyChanged = p.CSharpHierarchyChanged || other.CSharpHierarchyChanged
 	p.Files = appendUniqueSorted(p.Files, other.Files...)
+	p.ReplacedFiles = appendUniqueSorted(p.ReplacedFiles, other.ReplacedFiles...)
 	p.TypeIDs = appendUniqueSorted(p.TypeIDs, other.TypeIDs...)
 	p.ContractGroups = mergeContractGroups(p.ContractGroups, other.ContractGroups...)
 	p.ContractSymbolIDs = appendUniqueSorted(p.ContractSymbolIDs, other.ContractSymbolIDs...)
@@ -230,7 +236,7 @@ func containsCSharpHierarchyNode(nodes []*graph.Node) bool {
 }
 
 func derivedPlanForDelta(prior, fresh derivedFingerprints, semanticChanged bool, graphPath string, priorNodes, freshNodes []*graph.Node) DerivedInvalidationPlan {
-	plan := DerivedInvalidationPlan{Files: []string{graphPath}}
+	plan := DerivedInvalidationPlan{Files: []string{graphPath}, ReplacedFiles: []string{graphPath}}
 	if !prior.complete() || !fresh.complete() {
 		plan.Flags = DerivedInvalidatesDeclarations | DerivedInvalidatesImports | DerivedInvalidatesRuntime | DerivedInvalidatesArtifacts
 		plan.LegacyFallback = (derivedFingerprintSideExists(priorNodes) && !prior.complete()) ||

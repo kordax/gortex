@@ -67,7 +67,7 @@ func implementationInferenceRepos(store graph.Store, scopeTypes, scopeIfaces map
 	if len(ids) == 0 {
 		return nil
 	}
-	nodes := store.GetNodesByIDs(ids)
+	nodes := inferenceNodesByIDs(store, ids)
 	repos := make(map[string]struct{})
 	for _, node := range nodes {
 		if node != nil {
@@ -332,6 +332,15 @@ func (r *Resolver) inferImplements(scopeTypes, scopeIfaces map[string]bool) int 
 }
 
 func (r *Resolver) inferImplementationsByRepo(scopeTypes, scopeIfaces map[string]bool) int {
+	if scopeTypes != nil {
+		return r.inferImplementationsForFrontier(scopeTypes, scopeIfaces)
+	}
+	return r.inferImplementationsByRepoScan(scopeTypes, scopeIfaces)
+}
+
+// inferImplementationsByRepoScan retains the full-pass projection and the
+// reference scoped algorithm used by paired incremental benchmarks.
+func (r *Resolver) inferImplementationsByRepoScan(scopeTypes, scopeIfaces map[string]bool) int {
 	repos := implementationInferenceRepos(r.graph, scopeTypes, scopeIfaces)
 	if len(repos) == 0 {
 		return 0
@@ -565,6 +574,14 @@ func (r *Resolver) inferOverrides(scope map[string]bool) int {
 }
 
 func (r *Resolver) inferOverridesByRepo(scope map[string]bool) int {
+	if scope != nil {
+		return r.inferOverridesForFrontier(scope)
+	}
+	return r.inferOverridesByRepoScan(scope)
+}
+
+// inferOverridesByRepoScan is the full-pass projection and scoped reference.
+func (r *Resolver) inferOverridesByRepoScan(scope map[string]bool) int {
 	repos := overrideInferenceRepos(r.graph, scope)
 	if len(repos) == 0 {
 		return 0

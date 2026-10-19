@@ -6449,8 +6449,8 @@ func (idx *Indexer) incrementalReindexPathsMode(
 	if len(staleFiles) > 0 || len(deletedFiles) > 0 {
 		// Contract extraction is file-bounded even for body-only and metadata
 		// deltas: endpoint literals, response envelopes and source locations can
-		// change without changing declaration/call topology. Only an effective
-		// contract-set change requests the workspace reconciliation pass.
+		// change without changing declaration/call topology. Changed records or
+		// missing persisted ownership request the workspace reconciliation pass.
 		contractRefresh := idx.refreshContractsForFiles(invalidation.Files)
 		if contractRefresh.Changed {
 			invalidation.Flags |= DerivedInvalidatesContracts

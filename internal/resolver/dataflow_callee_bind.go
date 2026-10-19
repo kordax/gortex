@@ -97,6 +97,17 @@ func (r *Resolver) bindDataflowCalleeRefsFromCensus(census *postBareAttributionC
 // whole-graph sweep would for the file, keeping incremental == full-index
 // convergence, without scanning every function in the graph.
 func (r *Resolver) bindDataflowCalleeRefsForFile(filePath string) {
+	fileEdges := r.fileOutEdges(filePath)
+	hasCandidates := false
+	for _, edge := range fileEdges {
+		if edge != nil && (edge.Kind == graph.EdgeArgOf || edge.Kind == graph.EdgeValueFlow) && dataflowCalleeTargetShape(edge.To) {
+			hasCandidates = true
+			break
+		}
+	}
+	if !hasCandidates {
+		return
+	}
 	idx := newCalleeIndex()
 	for _, n := range r.incrementalFileNodes(filePath) {
 		if n == nil || n.Name == "" || n.FilePath == "" {
@@ -106,17 +117,20 @@ func (r *Resolver) bindDataflowCalleeRefsForFile(filePath string) {
 			indexName(idx.byFile, n.FilePath, n.Name, n.ID)
 		}
 	}
-	// Same-package functions: r.dirIndex[dir] carries one KindFile node per
-	// file in the directory, so each package file is visited exactly once.
+	// Same-file candidates win, including ambiguity: an ambiguous local name
+	// must never fall through to a unique sibling. Method targets use call-site
+	// evidence, so neither case needs the package's function nodes.
 	dir := filePathDir(filePath)
-	for _, fileNode := range r.dirIndex[dir] {
-		for _, n := range r.incrementalFileNodes(fileNode.FilePath) {
-			if n != nil && n.Kind == graph.KindFunction && n.Name != "" && n.FilePath != "" {
-				indexName(idx.byDir, dir, n.Name, n.ID)
-			}
+	for _, edge := range fileEdges {
+		if edge == nil || (edge.Kind != graph.EdgeArgOf && edge.Kind != graph.EdgeValueFlow) || !dataflowCalleeTargetShape(edge.To) {
+			continue
+		}
+		name := graph.UnresolvedName(edge.To)
+		if !strings.HasPrefix(name, "*.") && filePathDir(edge.FilePath) == dir && len(idx.byFile[edge.FilePath][name]) == 0 {
+			idx.byDir[dir] = r.incrementalPackageCallees(dir)
+			break
 		}
 	}
-	fileEdges := r.fileOutEdges(filePath)
 	for _, e := range fileEdges {
 		if e != nil && (e.Kind == graph.EdgeCalls || e.Kind == graph.EdgeReferences) {
 			idx.indexCallSite(e)
@@ -130,6 +144,67 @@ func (r *Resolver) bindDataflowCalleeRefsForFile(filePath string) {
 		collector.add(edge, bindDataflowCalleeEdge(edge, idx))
 	}
 	collector.flush()
+}
+
+// incrementalPackageCallees retains only function names and IDs for the active
+// attribution pass. Stores without the compound finder retain one batched
+// full-node read, rather than a query for every sibling file.
+func (r *Resolver) incrementalPackageCallees(dir string) map[string][]string {
+	if r.incrementalNodesByFile != nil {
+		if cached, ok := r.incrementalCalleeByDir[dir]; ok {
+			return cached
+		}
+	}
+	fileNodes := r.dirIndex[dir]
+	paths := make([]string, 0, len(fileNodes))
+	for _, fileNode := range fileNodes {
+		if fileNode.FilePath != "" {
+			paths = append(paths, fileNode.FilePath)
+		}
+	}
+	byFile := make(map[string][]*graph.Node, len(paths))
+	if finder, ok := r.graph.(graph.NodesInFilesByKindFinder); ok && len(paths) > 0 {
+		for _, node := range finder.NodesInFilesByKind(paths, []graph.NodeKind{graph.KindFunction}) {
+			if node != nil {
+				byFile[node.FilePath] = append(byFile[node.FilePath], node)
+			}
+		}
+	} else {
+		var missing []string
+		for _, path := range paths {
+			if nodes, cached := r.incrementalNodesByFile[path]; cached {
+				byFile[path] = nodes
+			} else {
+				missing = append(missing, path)
+			}
+		}
+		if len(missing) > 0 {
+			fetched := r.graph.GetFileNodesByPaths(missing)
+			for _, path := range missing {
+				byFile[path] = fetched[path]
+				if r.incrementalNodesByFile != nil {
+					r.incrementalNodesByFile[path] = fetched[path]
+				}
+			}
+		}
+	}
+	callees := make(map[string][]string)
+	// Retain the directory frontier's multiplicity and the old ambiguity
+	// rules, including legacy stores with multiple file nodes for one path.
+	for _, fileNode := range fileNodes {
+		for _, node := range byFile[fileNode.FilePath] {
+			if node != nil && node.Kind == graph.KindFunction && node.Name != "" && node.FilePath != "" {
+				callees[node.Name] = append(callees[node.Name], node.ID)
+			}
+		}
+	}
+	if r.incrementalNodesByFile != nil {
+		if r.incrementalCalleeByDir == nil {
+			r.incrementalCalleeByDir = make(map[string]map[string][]string)
+		}
+		r.incrementalCalleeByDir[dir] = callees
+	}
+	return callees
 }
 
 // calleeIndex holds the per-pass lookup tables bindDataflowCallee* uses.

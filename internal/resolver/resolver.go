@@ -388,6 +388,7 @@ type Resolver struct {
 	// tail reuses them across its six passes so a package-sized partial resolve
 	// never falls back to GetFileNodes/file adjacency once per pass per file.
 	incrementalNodesByFile        map[string][]*graph.Node
+	incrementalCalleeByDir        map[string]map[string][]string
 	incrementalOutByNode          map[string][]*graph.Edge
 	incrementalAttributionReindex []graph.EdgeReindex
 
