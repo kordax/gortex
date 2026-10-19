@@ -4,9 +4,9 @@ This fork has independent versions and updates at [kordax/gortex](https://github
 
 `gortex version` identifies the binary with `fork by kordax`, the fork repository, version and commit. Check `command -v gortex` too: an older installation earlier in `PATH` can still win. A running daemon keeps its previous executable until explicitly restarted.
 
-## Current release: v1.2.1
+## Current release: v1.2.2
 
-This patch releases canonical batch file locks after the durable disk commit, before graph refresh. A slow graph update no longer prevents a later edit of the same file. The same fix covers recovery of an interrupted commit; checkout generation locking is preserved. Regression tests cover both paths. The local dashboard at `http://127.0.0.1:9474`, bounded 24-hour history and incremental graph improvements from v1.2.0 remain available. Prometheus metrics, OpenTelemetry tracing and bounded profiles remain available. It includes a locally built static Linux amd64 archive and Debian package. Other platforms, cosign signatures and SLSA attestations are not included. Local checks are required before publication; GitHub CI is not awaited for this maintainer-requested manual release.
+Mutation admission now respects cancellation while waiting for the watcher lifecycle lock. Calls without a deadline also have a bounded wait and return an explicit deferral before admission. A later batch status query can retry graph refresh without repeating disk writes. Regression tests cover contention, cancellation and recovery. The canonical batch file-lock fixes from v1.2.1 remain available. The local dashboard at `http://127.0.0.1:9474`, bounded 24-hour history and incremental graph improvements from v1.2.0 remain available. Prometheus metrics, OpenTelemetry tracing and bounded profiles remain available. It includes a locally built static Linux amd64 archive and Debian package. Other platforms, cosign signatures and SLSA attestations are not included. Local checks are required before publication; GitHub CI is not awaited for this maintainer-requested manual release.
 
 Install the latest published release into `~/.local/bin` from this checkout:
 
@@ -16,9 +16,9 @@ sh scripts/install.sh
 gortex version
 ```
 
-The installer resolves the latest fork tag and verifies SHA-256. If cosign is installed, it also requires workflow signatures and refuses unsigned manual releases. Keep verification enabled; use the trusted-binary procedure below for an explicitly trusted manual build, substituting `v1.2.1` for `v1.0.0`.
+The installer resolves the latest fork tag and verifies SHA-256. If cosign is installed, it also requires workflow signatures and refuses unsigned manual releases. Keep verification enabled; use the trusted-binary procedure below for an explicitly trusted manual build, substituting `v1.2.2` for `v1.0.0`.
 
-For Debian or Ubuntu, download `gortex_linux_amd64.deb` from [v1.2.1](https://github.com/kordax/gortex/releases/tag/v1.2.1), verify it against `checksums.txt`, then install:
+For Debian or Ubuntu, download `gortex_linux_amd64.deb` from [v1.2.2](https://github.com/kordax/gortex/releases/tag/v1.2.2), verify it against `checksums.txt`, then install:
 
 ```sh
 sudo apt install ./gortex_linux_amd64.deb
