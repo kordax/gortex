@@ -22,6 +22,7 @@ import (
 
 	"github.com/zzet/gortex/internal/config"
 	"github.com/zzet/gortex/internal/daemon"
+	"github.com/zzet/gortex/internal/diagnostics"
 	"github.com/zzet/gortex/internal/indexer"
 	"github.com/zzet/gortex/internal/llm/conversationlog"
 	"github.com/zzet/gortex/internal/platform"
@@ -221,6 +222,11 @@ func runDaemonStart(cmd *cobra.Command, _ []string) error {
 	logger := newLogger()
 	startupReporter := newDaemonStartupReporter(logger)
 	defer startupReporter.Stop()
+	stopTracing, err := setupDaemonTracing(logger)
+	if err != nil {
+		return fmt.Errorf("daemon tracing: %w", err)
+	}
+	defer stopTracing()
 
 	// Raise the per-process file-descriptor cap as early as possible.
 	// fsnotify holds one FD per watched directory on Linux and one FD
@@ -249,7 +255,9 @@ func runDaemonStart(cmd *cobra.Command, _ []string) error {
 	// warmupDaemonState below so the socket opens immediately instead
 	// of waiting 30–60s for contract re-extraction across every tracked
 	// repo.
+	_, finishBuild := diagnostics.TraceOperation(context.Background(), "startup", "open_store")
 	state, err := buildDaemonState(logger, startupReporter.ObserveMigration)
+	finishBuild(err)
 	if err != nil {
 		startupReporter.Fail(err)
 		return fmt.Errorf("build daemon state: %w", err)
@@ -342,6 +350,11 @@ func runDaemonStart(cmd *cobra.Command, _ []string) error {
 		}
 		return ready, phase
 	}
+	stopObservability, err := startDaemonObservability(cmd, srv, controller, logger)
+	if err != nil {
+		return err
+	}
+	defer stopObservability()
 	disp := newMCPDispatcher(state.mcpServer, state.multiIndexer, logger)
 	// The local executor + the dispatcher's SetRouter are handed to the
 	// controller so ControlProxy can build/publish/tear-down the router
@@ -486,7 +499,6 @@ func runDaemonStart(cmd *cobra.Command, _ []string) error {
 	// Opt-in pprof endpoint. No-op unless GORTEX_DAEMON_PPROF_ADDR is
 	// set — keeps profiling off by default so the daemon doesn't hand
 	// its heap to anything on localhost.
-	startPProfIfEnabled(logger)
 
 	// Wire the daemon-health snapshot fn into the MCP server's
 	// healthBroadcaster. Captures the live controller, daemon
@@ -553,6 +565,8 @@ func runDaemonStart(cmd *cobra.Command, _ []string) error {
 
 		start := time.Now()
 		logger.Info("daemon: warmup starting")
+		_, finishWarmup := diagnostics.TraceOperation(context.Background(), "startup", "warmup")
+		defer finishWarmup(nil)
 		// Bring the checkout catalog in line with the configured repos
 		// before anything re-indexes them. It is the migration path for an
 		// installation that predates the catalog and the restart path for

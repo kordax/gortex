@@ -23,6 +23,7 @@ import (
 	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/graphview"
 	"github.com/zzet/gortex/internal/indexer"
+	"github.com/zzet/gortex/internal/observability"
 	"github.com/zzet/gortex/internal/pathkey"
 	"github.com/zzet/gortex/internal/reconcile"
 	"github.com/zzet/gortex/internal/releases"
@@ -958,6 +959,7 @@ func (c *realController) status(ctx context.Context, waitForAggregate bool) (dae
 	resp := daemon.StatusResponse{
 		TrackedRepos:   tracked,
 		MemoryBytes:    mem.Alloc,
+		Process:        observability.Process(),
 		SearchBackend:  agg.searchBackend,
 		TrigramCache:   trigramCacheForResponse(),
 		GraphIntegrity: daemon.GraphIntegrityStatusFor(g),

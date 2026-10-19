@@ -14,6 +14,9 @@ import (
 	"github.com/mark3labs/mcp-go/mcp"
 	mcpserver "github.com/mark3labs/mcp-go/server"
 	"go.uber.org/zap"
+
+	"github.com/zzet/gortex/internal/diagnostics"
+	"github.com/zzet/gortex/internal/observability"
 )
 
 // DefaultToolCallTimeout bounds how long one tool handler may occupy its
@@ -112,7 +115,34 @@ func boundHandler[Req, Res any](
 	expired func(timeout time.Duration, note *mutationCommitNote) (Res, error),
 	panicked func(recovered any) (Res, error),
 ) func(context.Context, Req) (Res, error) {
-	return func(ctx context.Context, req Req) (Res, error) {
+	return func(ctx context.Context, req Req) (result Res, resultErr error) {
+		finishMetric := observability.Default.Begin(kind, name)
+		spanName := name
+		if kind != "tool" {
+			spanName = kind
+		}
+		ctx, finishSpan := diagnostics.TraceOperation(ctx, kind, spanName)
+		metricOutcome := "success"
+		defer func() {
+			spanErr := resultErr
+			switch {
+			case errors.Is(resultErr, context.DeadlineExceeded):
+				metricOutcome = "deadline"
+			case errors.Is(resultErr, context.Canceled):
+				metricOutcome = "cancelled"
+			case resultErr != nil && metricOutcome == "success":
+				metricOutcome = "error"
+			default:
+				if toolResult, ok := any(result).(*mcp.CallToolResult); ok && toolResult != nil && toolResult.IsError && metricOutcome == "success" {
+					metricOutcome = "error"
+				}
+			}
+			if metricOutcome != "success" && spanErr == nil {
+				spanErr = errors.New(metricOutcome)
+			}
+			finishMetric(metricOutcome)
+			finishSpan(spanErr)
+		}()
 		if err := ctx.Err(); err != nil {
 			var zero Res
 			return zero, err
@@ -139,6 +169,7 @@ func boundHandler[Req, Res any](
 		}
 
 		if stuck := abandonedToolCalls.Load(); stuck >= maxAbandonedToolCalls {
+			metricOutcome = "busy"
 			return busy(stuck, timeout)
 		}
 
@@ -151,8 +182,9 @@ func boundHandler[Req, Res any](
 		callCtx, commitNote := withMutationCommitNote(callCtx)
 
 		type outcome struct {
-			res Res
-			err error
+			res      Res
+			err      error
+			panicked bool
 		}
 		// Buffered: the detached handler must be able to finish and exit even
 		// after this frame has returned, or abandoning a call would leak a
@@ -176,7 +208,7 @@ func boundHandler[Req, Res any](
 					}
 					done <- func() outcome {
 						res, err := panicked(r)
-						return outcome{res: res, err: err}
+						return outcome{res: res, err: err, panicked: true}
 					}()
 				}
 			}()
@@ -186,6 +218,9 @@ func boundHandler[Req, Res any](
 
 		select {
 		case got := <-done:
+			if got.panicked {
+				metricOutcome = "panic"
+			}
 			return got.res, got.err
 		case <-callCtx.Done():
 			stuck := abandonedToolCalls.Add(1)
@@ -207,6 +242,7 @@ func boundHandler[Req, Res any](
 					zap.Duration("elapsed", time.Since(started)),
 					zap.Int64("abandoned_in_flight", stuck))
 			}
+			metricOutcome = "deadline"
 			return expired(timeout, commitNote)
 		}
 	}

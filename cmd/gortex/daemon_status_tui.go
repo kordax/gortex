@@ -1,9 +1,11 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"os"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -134,18 +136,31 @@ func repoItemState(r daemon.TrackedRepoStatus) string {
 
 type tuiTickMsg time.Time
 type tuiStatusMsg daemon.StatusResponse
-type tuiFetchErrMsg struct{ err error }
+type tuiFetchErrMsg struct {
+	err     error
+	startup *daemon.RuntimeState
+}
+
+type tuiMonitorSnapshotMsg monitorSnapshot
 
 type statusTUI struct {
 	interval time.Duration
 	width    int
 	height   int
 
-	status     daemon.StatusResponse
-	hasStatus  bool
-	err        error
-	lastUpdate time.Time
-	meshTick   int
+	status           daemon.StatusResponse
+	hasStatus        bool
+	err              error
+	lastUpdate       time.Time
+	meshTick         int
+	fetching         bool
+	paused           bool
+	details          bool
+	startup          *daemon.RuntimeState
+	cpuPercent       *float64
+	fetchContext     context.Context
+	fetchCancel      context.CancelFunc
+	pendingSelection string
 
 	repos list.Model
 }
@@ -165,12 +180,13 @@ func newStatusTUI(interval time.Duration) statusTUI {
 	l.Styles.PaginationStyle = tuiHint
 	l.Styles.HelpStyle = tuiHint
 	l.SetStatusBarItemName("repo", "repos")
-	return statusTUI{interval: interval, repos: l}
+	ctx, cancel := context.WithCancel(context.Background())
+	return statusTUI{interval: interval, repos: l, fetching: true, fetchContext: ctx, fetchCancel: cancel}
 }
 
 func (m statusTUI) Init() tea.Cmd {
 	return tea.Batch(
-		tuiFetchCmd(),
+		m.fetchCmd(),
 		tea.Tick(m.interval, func(t time.Time) tea.Msg { return tuiTickMsg(t) }),
 		tea.Tick(150*time.Millisecond, func(t time.Time) tea.Msg { return tuiMeshTickMsg(t) }),
 	)
@@ -178,14 +194,12 @@ func (m statusTUI) Init() tea.Cmd {
 
 type tuiMeshTickMsg time.Time
 
-func tuiFetchCmd() tea.Cmd {
-	return func() tea.Msg {
-		st, err := fetchDaemonStatusForCLI()
-		if err != nil {
-			return tuiFetchErrMsg{err: err}
-		}
-		return tuiStatusMsg(st)
+func (m statusTUI) fetchCmd() tea.Cmd {
+	ctx := m.fetchContext
+	if ctx == nil {
+		ctx = context.Background()
 	}
+	return func() tea.Msg { return tuiMonitorSnapshotMsg(collectMonitorSnapshotContext(ctx)) }
 }
 
 func (m statusTUI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -199,17 +213,43 @@ func (m statusTUI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.repos.SetDelegate(repoDelegate{width: m.reposListWidth()})
 
 	case tuiTickMsg:
-		return m, tea.Batch(
-			tuiFetchCmd(),
-			tea.Tick(m.interval, func(t time.Time) tea.Msg { return tuiTickMsg(t) }),
-		)
+		next := tea.Tick(m.interval, func(t time.Time) tea.Msg { return tuiTickMsg(t) })
+		if m.paused || m.fetching {
+			return m, next
+		}
+		m.fetching = true
+		return m, tea.Batch(m.fetchCmd(), next)
+
+	case tuiMonitorSnapshotMsg:
+		m.fetching = false
+		if m.paused {
+			return m, nil
+		}
+		m.startup = msg.Startup
+		if msg.Error != "" {
+			return m.Update(tuiFetchErrMsg{err: fmt.Errorf("%s", msg.Error), startup: msg.Startup})
+		}
+		if msg.Status != nil {
+			return m.Update(tuiStatusMsg(*msg.Status))
+		}
+		return m, nil
 
 	case tuiMeshTickMsg:
 		m.meshTick++
 		return m, tea.Tick(150*time.Millisecond, func(t time.Time) tea.Msg { return tuiMeshTickMsg(t) })
 
 	case tuiStatusMsg:
-		m.status = daemon.StatusResponse(msg)
+		m.fetching = false
+		if m.paused {
+			return m, nil
+		}
+		selectedPath := ""
+		if selected, ok := m.repos.SelectedItem().(repoItem); ok {
+			selectedPath = selected.path
+		}
+		currentStatus := daemon.StatusResponse(msg)
+		m.cpuPercent = monitorCPUPercent(m.status.Process, currentStatus.Process)
+		m.status = currentStatus
 		m.hasStatus = true
 		m.err = nil
 		m.lastUpdate = time.Now()
@@ -224,7 +264,7 @@ func (m statusTUI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				nodes:     r.Nodes,
 				edges:     r.Edges,
 				path:      r.Path,
-				state:     repoItemState(r),
+				state:     monitorRepoItemState(m.status, r),
 			})
 		}
 		// Sort by total memory desc — biggest repos first, like top.
@@ -235,12 +275,29 @@ func (m statusTUI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return a.name < b.name
 		})
-		m.repos.SetItems(items)
+		itemsCmd := m.repos.SetItems(items)
+		m.pendingSelection = ""
+		if m.repos.FilterState() != list.Unfiltered {
+			m.pendingSelection = selectedPath
+		}
+		if selectedPath != "" && m.repos.FilterState() == list.Unfiltered {
+			for i, item := range items {
+				if item.(repoItem).path == selectedPath {
+					m.repos.Select(i)
+					break
+				}
+			}
+		}
 		m.repos.SetSize(m.reposListWidth(), m.reposListHeight())
+		return m, itemsCmd
 
 	case tuiFetchErrMsg:
+		m.fetching = false
+		if m.paused {
+			return m, nil
+		}
 		m.err = msg.err
-		m.lastUpdate = time.Now()
+		m.startup = msg.startup
 
 	case tea.KeyMsg:
 		// Don't intercept keys while the list is in filter mode — user is
@@ -250,12 +307,35 @@ func (m statusTUI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		switch msg.String() {
 		case "q", "ctrl+c", "esc":
+			if m.fetchCancel != nil {
+				m.fetchCancel()
+			}
 			return m, tea.Quit
+		case " ", "p":
+			m.paused = !m.paused
+			if !m.paused && !m.fetching {
+				m.fetching = true
+				return m, m.fetchCmd()
+			}
+			return m, nil
+		case "enter", "d":
+			m.details = !m.details
+			m.repos.SetSize(m.reposListWidth(), m.reposListHeight())
+			return m, nil
 		}
 	}
 
 	var cmd tea.Cmd
 	m.repos, cmd = m.repos.Update(msg)
+	if _, matched := msg.(list.FilterMatchesMsg); matched && m.pendingSelection != "" {
+		for i, item := range m.repos.VisibleItems() {
+			if item.(repoItem).path == m.pendingSelection {
+				m.repos.Select(i)
+				break
+			}
+		}
+		m.pendingSelection = ""
+	}
 	return m, cmd
 }
 
@@ -286,8 +366,14 @@ func (m statusTUI) View() string {
 		push(w)
 		gap(1)
 	}
+	push(m.renderMonitorProgress())
+	gap(1)
 	push(m.renderRepos())
 	gap(1)
+	if m.details {
+		push(m.renderSelectedRepo())
+		gap(1)
+	}
 	if s := m.renderSessions(); s != "" {
 		push(s)
 		gap(1)
@@ -301,8 +387,14 @@ func (m statusTUI) View() string {
 		gap(1)
 	}
 	push(m.renderFooter())
-	return strings.Join(lines, "\n")
+	view := strings.Join(lines, "\n")
+	if _, disabled := os.LookupEnv("NO_COLOR"); disabled || os.Getenv("TERM") == "dumb" {
+		return monitorANSIPattern.ReplaceAllString(view, "")
+	}
+	return view
 }
+
+var monitorANSIPattern = regexp.MustCompile(`\x1b\[[0-?]*[ -/]*[@-~]`)
 
 // tuiPadding is the left inset (in columns) applied to every section.
 const tuiPadding = 2
@@ -511,11 +603,17 @@ func (m statusTUI) renderLSPRouter() string {
 }
 
 func (m statusTUI) renderFooter() string {
-	left := tuiHint.Render(time.Now().Format("15:04:05") + " · refreshing every " + m.interval.String())
+	mode := "refreshing every " + m.interval.String()
+	if m.paused {
+		mode = "PAUSED (display only; daemon continues)"
+	}
+	left := tuiHint.Render(time.Now().Format("15:04:05") + " · " + mode)
 	right := strings.Join([]string{
 		tuiKeybindKey.Render("/") + tuiKeybindHint.Render(" filter"),
 		tuiKeybindKey.Render("↑↓") + tuiKeybindHint.Render(" scroll"),
-		tuiKeybindKey.Render("q") + tuiKeybindHint.Render(" quit"),
+		tuiKeybindKey.Render("enter") + tuiKeybindHint.Render(" details"),
+		tuiKeybindKey.Render("p") + tuiKeybindHint.Render(" pause"),
+		tuiKeybindKey.Render("q") + tuiKeybindHint.Render(" exit monitor"),
 	}, tuiKeybindHint.Render("  "))
 	pad := m.width - lipgloss.Width(left) - lipgloss.Width(right)
 	if pad < 1 {
@@ -552,6 +650,10 @@ func (m statusTUI) reposListHeight() int {
 		if len(m.status.ConfiguredServers) > 0 {
 			reserved += 1 + len(m.status.ConfiguredServers) + 1
 		}
+	}
+	reserved += strings.Count(m.renderMonitorProgress(), "\n") + 2
+	if m.details {
+		reserved += 6
 	}
 	reserved += 1 // repos heading row
 	reserved += 2 // bubbles list status bar + pagination

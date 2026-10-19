@@ -7,6 +7,7 @@ import (
 	"sync"
 
 	"github.com/zzet/gortex/internal/daemon"
+	"github.com/zzet/gortex/internal/diagnostics"
 	gortexmcp "github.com/zzet/gortex/internal/mcp"
 	"github.com/zzet/gortex/internal/mcp/streamable"
 	"github.com/zzet/gortex/internal/server"
@@ -27,7 +28,7 @@ func composeDaemonHTTPHandler(streamH, v1 http.Handler, tokenFn func() string, c
 	if corsOrigin != "" {
 		handler = server.WithCORS(handler, server.CORSOptions{AllowOrigins: []string{corsOrigin}})
 	}
-	return browserOriginGuard(handler, daemonHTTPAllowedOrigins)
+	return browserOriginGuard(diagnostics.HTTPTracing(handler), daemonHTTPAllowedOrigins)
 }
 
 // daemonStreamableDispatcher bridges streamable.Transport (which has

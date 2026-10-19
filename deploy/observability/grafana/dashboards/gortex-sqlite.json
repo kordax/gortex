@@ -1,0 +1,22 @@
+{
+  "uid": "gortex-sqlite",
+  "title": "Gortex / SQLite",
+  "tags": ["gortex", "sqlite"],
+  "timezone": "browser",
+  "schemaVersion": 41,
+  "version": 1,
+  "editable": false,
+  "refresh": "5s",
+  "time": {"from": "now-1h", "to": "now"},
+  "templating": {"list": [{"name": "instance", "label": "Daemon", "type": "query", "datasource": {"type": "prometheus", "uid": "gortex-prometheus"}, "query": "label_values(up{job=\"gortex\"}, instance)", "refresh": 1}]},
+  "panels": [
+    {"id": 1, "title": "SQLite metric scope", "type": "text", "gridPos": {"x": 0, "y": 0, "w": 24, "h": 4}, "options": {"mode": "markdown", "content": "Connection waits measure **database/sql pool admission**, not query execution time, SQLite lock contention, or transaction latency. Open/idle/in-use are pool snapshots. DB/WAL sizes are asynchronous filesystem samples, not RAM or page-cache usage. WAL size zero can be a real measurement; unavailable file samples remain missing. These metrics do not prove that every SQL query uses an index; use query-plan tests and targeted profiles for that."}},
+    {"id": 2, "title": "Connections by pool and state", "type": "timeseries", "gridPos": {"x": 0, "y": 4, "w": 12, "h": 8}, "datasource": {"type": "prometheus", "uid": "gortex-prometheus"}, "targets": [{"expr": "gortex_sqlite_connections{job=\"gortex\",instance=\"$instance\"}", "legendFormat": "{{pool}} / {{state}}", "refId": "A"}], "fieldConfig": {"defaults": {"min": 0, "unit": "short"}}},
+    {"id": 3, "title": "Connection limits", "type": "timeseries", "gridPos": {"x": 12, "y": 4, "w": 12, "h": 8}, "datasource": {"type": "prometheus", "uid": "gortex-prometheus"}, "targets": [{"expr": "gortex_sqlite_connection_limit{job=\"gortex\",instance=\"$instance\"}", "legendFormat": "{{pool}}", "refId": "A"}], "fieldConfig": {"defaults": {"min": 0, "unit": "short"}}},
+    {"id": 4, "title": "Pool admission waits / second", "type": "timeseries", "gridPos": {"x": 0, "y": 12, "w": 12, "h": 8}, "datasource": {"type": "prometheus", "uid": "gortex-prometheus"}, "targets": [{"expr": "rate(gortex_sqlite_pool_waits_total{job=\"gortex\",instance=\"$instance\"}[$__rate_interval])", "legendFormat": "{{pool}}", "refId": "A"}], "fieldConfig": {"defaults": {"min": 0, "unit": "ops"}}},
+    {"id": 5, "title": "Mean pool admission wait", "type": "timeseries", "gridPos": {"x": 12, "y": 12, "w": 12, "h": 8}, "datasource": {"type": "prometheus", "uid": "gortex-prometheus"}, "targets": [{"expr": "rate(gortex_sqlite_pool_wait_duration_seconds_total{job=\"gortex\",instance=\"$instance\"}[$__rate_interval]) / rate(gortex_sqlite_pool_waits_total{job=\"gortex\",instance=\"$instance\"}[$__rate_interval])", "legendFormat": "{{pool}}", "refId": "A"}], "fieldConfig": {"defaults": {"min": 0, "unit": "s"}}},
+    {"id": 6, "title": "Database and WAL disk size", "type": "timeseries", "gridPos": {"x": 0, "y": 20, "w": 12, "h": 8}, "datasource": {"type": "prometheus", "uid": "gortex-prometheus"}, "targets": [{"expr": "gortex_sqlite_file_bytes{job=\"gortex\",instance=\"$instance\"}", "legendFormat": "{{kind}}", "refId": "A"}], "fieldConfig": {"defaults": {"min": 0, "unit": "bytes"}}},
+    {"id": 7, "title": "File size sample available", "type": "stat", "gridPos": {"x": 12, "y": 20, "w": 6, "h": 4}, "datasource": {"type": "prometheus", "uid": "gortex-prometheus"}, "targets": [{"expr": "gortex_sqlite_file_sample_available{job=\"gortex\",instance=\"$instance\"}", "refId": "A"}], "fieldConfig": {"defaults": {"min": 0, "max": 1}}},
+    {"id": 8, "title": "File size sample age", "type": "stat", "gridPos": {"x": 18, "y": 20, "w": 6, "h": 4}, "datasource": {"type": "prometheus", "uid": "gortex-prometheus"}, "targets": [{"expr": "(time() - gortex_sqlite_file_sample_timestamp_seconds{job=\"gortex\",instance=\"$instance\"}) and on (instance) (gortex_sqlite_file_sample_available{job=\"gortex\",instance=\"$instance\"} == 1)", "refId": "A"}], "fieldConfig": {"defaults": {"min": 0, "unit": "s"}}}
+  ]
+}

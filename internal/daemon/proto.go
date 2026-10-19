@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"io"
 	"time"
+
+	"github.com/zzet/gortex/internal/observability"
 )
 
 // ProtocolVersion is the daemon wire-protocol version. Both ends of a
@@ -329,9 +331,11 @@ type StatusResponse struct {
 	// MemoryBytes is runtime.MemStats.Alloc — live allocated heap.
 	// Retained for backwards compatibility with older clients; new
 	// clients should read from Runtime.
-	MemoryBytes   uint64             `json:"memory_bytes"`
-	Runtime       RuntimeStats       `json:"runtime"`
-	SearchBackend SearchBackendStats `json:"search_backend"`
+	MemoryBytes uint64       `json:"memory_bytes"`
+	Runtime     RuntimeStats `json:"runtime"`
+	// Process is an asynchronous OS sample; nil on older daemon versions.
+	Process       *observability.ProcessSnapshot `json:"process,omitempty"`
+	SearchBackend SearchBackendStats             `json:"search_backend"`
 	// TrigramCache reports the in-memory literal-search index, which is
 	// per repo, lazily built, and can be the largest single structure in
 	// the daemon — while SearchBackend above may simultaneously report

@@ -1,0 +1,11 @@
+apiVersion: 1
+providers:
+  - name: Gortex
+    orgId: 1
+    folder: Gortex
+    type: file
+    disableDeletion: false
+    allowUiUpdates: false
+    updateIntervalSeconds: 30
+    options:
+      path: /etc/grafana/dashboards

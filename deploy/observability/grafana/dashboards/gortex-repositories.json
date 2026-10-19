@@ -1,0 +1,22 @@
+{
+  "uid": "gortex-repositories",
+  "title": "Gortex / Repository snapshots",
+  "tags": ["gortex", "indexing"],
+  "timezone": "browser",
+  "schemaVersion": 41,
+  "version": 1,
+  "editable": false,
+  "refresh": "5s",
+  "time": {"from": "now-1h", "to": "now"},
+  "templating": {"list": [{"name": "instance", "label": "Daemon", "type": "query", "datasource": {"type": "prometheus", "uid": "gortex-prometheus"}, "query": "label_values(up{job=\"gortex\"}, instance)", "refresh": 1}]},
+  "panels": [
+    {"id": 1, "title": "Snapshot limitations", "type": "text", "gridPos": {"x": 0, "y": 0, "w": 24, "h": 4}, "options": {"mode": "markdown", "content": "Repository statistics come from a cached daemon status snapshot. Scraping does not rescan the graph. Check **availability and age** before interpreting counts. File and node counts measure indexed content, not a completion percentage or backlog. Repo labels use configured names, not filesystem paths. An autonomous metadata sampler refreshes this snapshot without requiring CLI status calls; source and age show whether cached status or indexer metadata supplied it. Use `gortex daemon monitor` for live startup phase details. Unavailable or stale data must not be interpreted as an empty graph."}},
+    {"id": 2, "title": "Aggregate snapshot available", "type": "stat", "gridPos": {"x": 0, "y": 4, "w": 8, "h": 4}, "datasource": {"type": "prometheus", "uid": "gortex-prometheus"}, "targets": [{"expr": "gortex_daemon_aggregate_available{job=\"gortex\",instance=\"$instance\"}", "refId": "A"}], "fieldConfig": {"defaults": {"min": 0, "max": 1}}},
+    {"id": 3, "title": "Aggregate snapshot age", "type": "stat", "gridPos": {"x": 8, "y": 4, "w": 8, "h": 4}, "datasource": {"type": "prometheus", "uid": "gortex-prometheus"}, "targets": [{"expr": "(time() - gortex_daemon_aggregate_snapshot_timestamp_seconds{job=\"gortex\",instance=\"$instance\"}) and on (instance) (gortex_daemon_aggregate_available{job=\"gortex\",instance=\"$instance\"} == 1)", "refId": "A"}], "fieldConfig": {"defaults": {"min": 0, "unit": "s"}}},
+    {"id": 8, "title": "Aggregate source", "type": "stat", "gridPos": {"x": 16, "y": 4, "w": 8, "h": 4}, "datasource": {"type": "prometheus", "uid": "gortex-prometheus"}, "targets": [{"expr": "gortex_daemon_aggregate_source{job=\"gortex\",instance=\"$instance\"}", "legendFormat": "{{source}}", "refId": "A"}], "options": {"textMode": "name"}},
+    {"id": 4, "title": "Indexed files by repository (cached)", "type": "timeseries", "gridPos": {"x": 0, "y": 8, "w": 12, "h": 8}, "datasource": {"type": "prometheus", "uid": "gortex-prometheus"}, "targets": [{"expr": "gortex_repo_files{job=\"gortex\",instance=\"$instance\"}", "legendFormat": "{{repo}}", "refId": "A"}], "fieldConfig": {"defaults": {"min": 0, "unit": "short"}}},
+    {"id": 5, "title": "Indexed nodes by repository (cached)", "type": "timeseries", "gridPos": {"x": 12, "y": 8, "w": 12, "h": 8}, "datasource": {"type": "prometheus", "uid": "gortex-prometheus"}, "targets": [{"expr": "gortex_repo_nodes{job=\"gortex\",instance=\"$instance\"}", "legendFormat": "{{repo}}", "refId": "A"}], "fieldConfig": {"defaults": {"min": 0, "unit": "short"}}},
+    {"id": 6, "title": "Edges by repository (cached)", "type": "timeseries", "gridPos": {"x": 0, "y": 16, "w": 12, "h": 8}, "datasource": {"type": "prometheus", "uid": "gortex-prometheus"}, "targets": [{"expr": "gortex_repo_edges{job=\"gortex\",instance=\"$instance\"}", "legendFormat": "{{repo}}", "refId": "A"}], "fieldConfig": {"defaults": {"min": 0, "unit": "short"}}},
+    {"id": 7, "title": "Indexed state by repository (cached)", "type": "timeseries", "gridPos": {"x": 12, "y": 16, "w": 12, "h": 8}, "datasource": {"type": "prometheus", "uid": "gortex-prometheus"}, "targets": [{"expr": "gortex_repo_indexed{job=\"gortex\",instance=\"$instance\"}", "legendFormat": "{{repo}}", "refId": "A"}], "fieldConfig": {"defaults": {"min": 0, "max": 1}}}
+  ]
+}
