@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path"
@@ -861,16 +862,16 @@ func (s *Server) reviewImpact(ctx context.Context, changed []analysis.ChangedSym
 	if len(changed) == 0 {
 		return nil
 	}
-	communities := s.getCommunities()
-	processes := s.getProcesses()
 	out := make(map[string]*analysis.ImpactResult, len(changed))
 	for _, cs := range changed {
 		if cs.ID == "" {
 			continue
 		}
-		if ir := analysis.AnalyzeImpact(s.readerFor(ctx), []string{cs.ID}, communities, processes); ir != nil {
-			out[cs.ID] = ir
+		ir := diffImpactContext(ctx, s.readerFor(ctx), []string{cs.ID}, nil, nil)
+		if err := s.enrichImpactMemberships(ctx, ir, []string{cs.ID}); err != nil {
+			markImpactAnalysisUnavailable(ir, err)
 		}
+		out[cs.ID] = ir
 	}
 	if len(out) == 0 {
 		return nil
@@ -1250,6 +1251,32 @@ func (s *Server) handleReviewPack(ctx context.Context, req mcp.CallToolRequest) 
 	}
 
 	payload := reviewPackPayload(env)
+	availabilityImpacts := impact
+	if receipt.AnalysisStatus != "" {
+		structuralComplete := true
+		availabilityImpacts = make(map[string]*analysis.ImpactResult, len(impact)+1)
+		for id, item := range impact {
+			availabilityImpacts[id] = item
+			if item != nil {
+				if item.StructuralComplete != nil {
+					structuralComplete = structuralComplete && *item.StructuralComplete
+				} else {
+					structuralComplete = structuralComplete && !item.LowerBound && !item.Truncated
+				}
+			}
+		}
+		availability := &analysis.ImpactResult{StructuralComplete: &structuralComplete}
+		err := errAnalysisGenerationUnavailable
+		if receipt.AnalysisStatus == "pending" {
+			err = errAnalysisPending
+		}
+		markImpactAnalysisUnavailable(availability, err)
+		availabilityImpacts["receipt"] = availability
+	}
+	applyReviewAnalysisAvailability(payload, availabilityImpacts)
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 
 	if s.isGCX(ctx, req) {
 		return s.gcxResponseWithBudget(req)(encodeReviewPack(payload))
@@ -1440,7 +1467,7 @@ func (s *Server) reviewReceipt(ctx context.Context, ids []string, diff *analysis
 	if diff != nil {
 		changedFiles = diff.ChangedFiles
 	}
-	communities := s.getCommunities()
+	communities, processes, membershipErr := s.analysisMembershipsForNodes(ctx, ids)
 	var nodeToComm map[string]string
 	if communities != nil {
 		nodeToComm = communities.NodeToComm
@@ -1450,10 +1477,22 @@ func (s *Server) reviewReceipt(ctx context.Context, ids []string, diff *analysis
 		ChangedFiles: changedFiles,
 		NodeToComm:   nodeToComm,
 		Communities:  communities,
-		Processes:    s.getProcesses(),
+		Processes:    processes,
 	})
 	blocker := (ci != nil && ci.Breaking > 0) || len(guards) > 0
-	return analysis.BuildReviewReceipt(result, "NONE", blocker, scrub)
+	receipt := analysis.BuildReviewReceipt(result, "NONE", blocker, scrub)
+	if membershipErr != nil {
+		complete := false
+		receipt.AnalysisStatus = "unavailable"
+		if errors.Is(membershipErr, errAnalysisPending) {
+			receipt.AnalysisStatus = "pending"
+		}
+		receipt.Complete, receipt.LowerBound = &complete, true
+		if !receipt.MergeBlocker && receipt.NextSafeAction == "merge-ready" {
+			receipt.NextSafeAction = "retry_analysis"
+		}
+	}
+	return receipt
 }
 
 // buildReviewPack renders the FG9 tiered review pack for the envelope: changed

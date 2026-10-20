@@ -2725,6 +2725,16 @@ func encodePRReviewContext(out prReviewContext) ([]byte, error) {
 		return nil, err
 	}
 
+	if availability := out.Availability; availability != nil && availability.AnalysisStatus != "" {
+		enc := newGCX(&buf, "pr_review_context.analysis", []string{"analysis_status", "complete", "lower_bound", "structural_complete", "detail"})
+		if err := enc.WriteRow(availability.AnalysisStatus, false, true, *availability.StructuralComplete, availability.AnalysisDetail); err != nil {
+			return nil, err
+		}
+		if err := enc.Close(); err != nil {
+			return nil, err
+		}
+	}
+
 	gateEnc := newGCX(&buf, "pr_review_context.gates",
 		[]string{"name", "status", "detail"},
 	)
@@ -2835,6 +2845,16 @@ func encodeReviewPack(result map[string]any) ([]byte, error) {
 	}
 	if err := sumEnc.Close(); err != nil {
 		return nil, err
+	}
+
+	if status, ok := result["analysis_status"].(string); ok && status != "" {
+		availability := newGCX(&buf, "review_pack.analysis", []string{"analysis_status", "complete", "lower_bound", "structural_complete", "detail"})
+		if err := availability.WriteRow(status, result["complete"], result["lower_bound"], result["structural_complete"], result["analysis_detail"]); err != nil {
+			return nil, err
+		}
+		if err := availability.Close(); err != nil {
+			return nil, err
+		}
 	}
 
 	symEnc := newGCX(&buf, "review_pack.changed_symbols",

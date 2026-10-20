@@ -2,7 +2,6 @@ package mcp
 
 import (
 	"context"
-	"sort"
 
 	"github.com/zzet/gortex/internal/analysis"
 	"github.com/zzet/gortex/internal/graph"
@@ -19,20 +18,6 @@ func (s *Server) analysisNodeMetricsBatched(nodeIDs []string) ([]graph.AnalysisN
 	for start := 0; start < len(ids); start += analysisGenerationQueryMax {
 		end := min(start+analysisGenerationQueryMax, len(ids))
 		page, err := s.analysisNodeMetrics(ids[start:end])
-		if err != nil {
-			return nil, err
-		}
-		rows = append(rows, page...)
-	}
-	return rows, nil
-}
-
-func (s *Server) analysisProcessesForNodesBatched(nodeIDs []string) ([]graph.AnalysisProcessMembership, error) {
-	ids := dedupeStrings(nodeIDs)
-	rows := make([]graph.AnalysisProcessMembership, 0, len(ids))
-	for start := 0; start < len(ids); start += analysisGenerationQueryMax {
-		end := min(start+analysisGenerationQueryMax, len(ids))
-		page, err := s.analysisProcessesForNodes(ids[start:end])
 		if err != nil {
 			return nil, err
 		}
@@ -68,40 +53,8 @@ func (s *Server) topAnalysisMetricValue(metric graph.AnalysisMetric) float64 {
 // without retaining whole-graph maps on the Server.
 func (s *Server) analyzeImpactLazy(ctx context.Context, symbolIDs []string) *analysis.ImpactResult {
 	result := analysis.AnalyzeImpactContext(ctx, s.readerFor(ctx), symbolIDs, nil, nil)
-	ids := append([]string(nil), symbolIDs...)
-	for depth := 1; depth <= 3; depth++ {
-		for _, entry := range result.ByDepth[depth] {
-			ids = append(ids, entry.ID)
-		}
-	}
-	ids = dedupeStrings(ids)
-
-	if metrics, err := s.analysisNodeMetricsBatched(ids); err == nil {
-		communities := make(map[string]struct{})
-		for _, metric := range metrics {
-			if metric.CommunityID != "" {
-				communities[metric.CommunityID] = struct{}{}
-			}
-		}
-		result.AffectedCommunities = result.AffectedCommunities[:0]
-		for id := range communities {
-			result.AffectedCommunities = append(result.AffectedCommunities, id)
-		}
-		sort.Strings(result.AffectedCommunities)
-	}
-
-	if memberships, err := s.analysisProcessesForNodesBatched(ids); err == nil {
-		processes := make(map[string]struct{})
-		for _, membership := range memberships {
-			if membership.ProcessID != "" {
-				processes[membership.ProcessID] = struct{}{}
-			}
-		}
-		result.AffectedProcesses = result.AffectedProcesses[:0]
-		for id := range processes {
-			result.AffectedProcesses = append(result.AffectedProcesses, id)
-		}
-		sort.Strings(result.AffectedProcesses)
+	if err := s.enrichImpactMemberships(ctx, result, symbolIDs); err != nil {
+		markImpactAnalysisUnavailable(result, err)
 	}
 	return result
 }

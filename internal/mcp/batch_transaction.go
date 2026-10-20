@@ -66,29 +66,35 @@ type batchTransactionFile struct {
 }
 
 type batchTransactionReceipt struct {
-	CheckoutID          string                 `json:"checkout_id,omitempty"`
-	CheckoutIncarnation string                 `json:"checkout_incarnation,omitempty"`
-	CheckoutRoot        string                 `json:"checkout_root,omitempty"`
-	Version             int                    `json:"version"`
-	TransactionID       string                 `json:"transaction_id"`
-	Fingerprint         string                 `json:"fingerprint"`
-	Status              string                 `json:"status"`
-	DiskStatus          string                 `json:"disk_status"`
-	GraphStatus         string                 `json:"graph_status"`
-	Error               string                 `json:"error,omitempty"`
-	Results             []batchEditResult      `json:"results,omitempty"`
-	Summary             map[string]int         `json:"summary,omitempty"`
-	Files               []batchTransactionFile `json:"files,omitempty"`
-	StartedAt           time.Time              `json:"started_at"`
-	CompletedAt         *time.Time             `json:"completed_at,omitempty"`
-	Recovered           bool                   `json:"recovered,omitempty"`
+	OriginCheckoutID          string                 `json:"origin_checkout_id,omitempty"`
+	OriginCheckoutIncarnation string                 `json:"origin_checkout_incarnation,omitempty"`
+	OriginCheckoutRoot        string                 `json:"origin_checkout_root,omitempty"`
+	CheckoutID                string                 `json:"checkout_id,omitempty"`
+	CheckoutIncarnation       string                 `json:"checkout_incarnation,omitempty"`
+	CheckoutRoot              string                 `json:"checkout_root,omitempty"`
+	Version                   int                    `json:"version"`
+	TransactionID             string                 `json:"transaction_id"`
+	Fingerprint               string                 `json:"fingerprint"`
+	Status                    string                 `json:"status"`
+	DiskStatus                string                 `json:"disk_status"`
+	GraphStatus               string                 `json:"graph_status"`
+	Error                     string                 `json:"error,omitempty"`
+	Results                   []batchEditResult      `json:"results,omitempty"`
+	Summary                   map[string]int         `json:"summary,omitempty"`
+	Files                     []batchTransactionFile `json:"files,omitempty"`
+	StartedAt                 time.Time              `json:"started_at"`
+	CompletedAt               *time.Time             `json:"completed_at,omitempty"`
+	Recovered                 bool                   `json:"recovered,omitempty"`
+	RecoveryRequired          bool                   `json:"recovery_required,omitempty"`
+	ResumeAvailable           bool                   `json:"resume_available,omitempty"`
 }
 
 type batchTransactionState struct {
 	fingerprint string
 	done        chan struct{}
 	doneOnce    sync.Once
-	graphMu     sync.Mutex
+	graphMu     chan struct{}
+	graphOnce   sync.Once
 	mu          sync.RWMutex
 	receipt     batchTransactionReceipt
 }
@@ -1032,7 +1038,7 @@ func (s *Server) runBatchTransaction(ctx context.Context, edits []batchEditItem,
 		return batchTransactionReceipt{}, err
 	}
 	mutationCommitNoteFrom(ctx).observeBatch(state)
-	if err := guardBatchCheckout(ctx, state.snapshot()); err != nil {
+	if err := s.guardBatchTransactionAuthority(ctx, state.snapshot()); err != nil {
 		return batchTransactionReceipt{}, err
 	}
 	switch action {
@@ -1043,7 +1049,7 @@ func (s *Server) runBatchTransaction(ctx context.Context, edits []batchEditItem,
 		return state.snapshot(), nil
 	case "refresh_graph":
 		s.refreshBatchGraphForContext(ctx, state)
-		return state.snapshot(), nil
+		return state.snapshot(), ctx.Err()
 	}
 
 	receipt := state.snapshot()
@@ -1063,6 +1069,9 @@ func (s *Server) runBatchTransaction(ctx context.Context, edits []batchEditItem,
 		}
 	}
 	for _, path := range paths {
+		if receipt.OriginCheckoutID != "" && !pathContainedIn(path, receipt.OriginCheckoutRoot) {
+			return s.finishBatchTransaction(state, receipt, "aborted", "unchanged", "not_started", "batch path is outside its recorded primary checkout"), nil
+		}
 		if err := guardCheckoutMutationPath(ctx, path); err != nil {
 			return s.finishBatchTransaction(state, receipt, "aborted", "unchanged", "not_started", err.Error()), nil
 		}
@@ -1196,7 +1205,9 @@ func (s *Server) runBatchTransaction(ctx context.Context, edits []batchEditItem,
 			session.recordSymbol(plan.edit.SymbolID)
 		}
 	}
-	s.refreshBatchGraphForContext(ctx, state)
+	// Once disk committed, the owner must finish publication independently of
+	// its caller. Retry/resume waiters retain cancellable graph admission.
+	s.refreshBatchGraphForContext(context.WithoutCancel(ctx), state)
 	return state.snapshot(), nil
 }
 
@@ -1214,6 +1225,9 @@ func waitBatchTransaction(ctx context.Context, state *batchTransactionState) bat
 }
 
 func (s *Server) batchTransactionStatus(ctx context.Context, transactionID string) (batchTransactionReceipt, error) {
+	if err := ctx.Err(); err != nil {
+		return batchTransactionReceipt{}, err
+	}
 	id := strings.TrimSpace(transactionID)
 	if id == "" {
 		return batchTransactionReceipt{}, fmt.Errorf("transaction_id is required for status")
@@ -1223,19 +1237,19 @@ func (s *Server) batchTransactionStatus(ctx context.Context, transactionID strin
 		if !valid {
 			return batchTransactionReceipt{}, fmt.Errorf("invalid transaction state for %q", id)
 		}
-		if err := guardBatchCheckout(ctx, state.snapshot()); err != nil {
+		if err := s.guardBatchTransactionAuthority(ctx, state.snapshot()); err != nil {
 			return batchTransactionReceipt{}, err
 		}
 		if existingBatchTransactionAction(state) == "refresh_graph" {
 			s.refreshBatchGraphForContext(ctx, state)
 		}
-		return state.snapshot(), nil
+		return state.snapshot(), ctx.Err()
 	}
 	state, action, err := s.loadOrCreateBatchTransaction(ctx, id, "")
 	if err != nil {
 		return batchTransactionReceipt{}, err
 	}
-	if err := guardBatchCheckout(ctx, state.snapshot()); err != nil {
+	if err := s.guardBatchTransactionAuthority(ctx, state.snapshot()); err != nil {
 		return batchTransactionReceipt{}, err
 	}
 	switch action {
@@ -1244,7 +1258,7 @@ func (s *Server) batchTransactionStatus(ctx context.Context, transactionID strin
 	case "refresh_graph":
 		s.refreshBatchGraphForContext(ctx, state)
 	}
-	return state.snapshot(), nil
+	return state.snapshot(), ctx.Err()
 }
 
 func (s *Server) beginBatchGraphRefresh(absPath string) mutationReindexOutcome {
@@ -1302,8 +1316,19 @@ func (s *Server) waitBatchGraphReceipts(files []batchTransactionFile) {
 }
 
 func (s *Server) refreshBatchGraphForContext(ctx context.Context, state *batchTransactionState) {
-	state.graphMu.Lock()
-	defer state.graphMu.Unlock()
+	state.graphOnce.Do(func() { state.graphMu = make(chan struct{}, 1) })
+	if ctx.Err() != nil {
+		return
+	}
+	select {
+	case state.graphMu <- struct{}{}:
+	case <-ctx.Done():
+		return
+	}
+	defer func() { <-state.graphMu }()
+	if ctx.Err() != nil {
+		return
+	}
 
 	receipt := state.snapshot()
 	if receipt.Status != "committed" {
@@ -1423,10 +1448,19 @@ func (s *Server) finishBatchTransaction(state *batchTransactionState, receipt ba
 func (s *Server) handleAtomicBatchEdit(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	args := req.GetArguments()
 	transactionID, _ := args["transaction_id"].(string)
-	statusOnly, _ := args["status_only"].(bool)
-	rawEdits, hasEdits := args["edits"]
-	if statusOnly || !hasEdits || rawEdits == nil {
-		receipt, err := s.batchTransactionStatus(ctx, transactionID)
+	intent, intentErr := classifyBatchArguments(args)
+	if intentErr != nil {
+		return mcp.NewToolResultError(intentErr.Error()), nil
+	}
+	rawEdits := args["edits"]
+	if intent != batchRequestExecute {
+		var receipt batchTransactionReceipt
+		var err error
+		if intent == batchRequestPoll {
+			receipt, err = s.pollBatchTransaction(ctx, transactionID)
+		} else {
+			receipt, err = s.batchTransactionStatus(ctx, transactionID)
+		}
 		if err != nil {
 			return mcp.NewToolResultError(err.Error()), nil
 		}

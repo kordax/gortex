@@ -144,10 +144,18 @@ func (s *Server) wrapToolHandlerMode(h mcpserver.ToolHandlerFunc, injectOverlay 
 		if blocked := s.checkToolGate(ctx, req.Params.Name); blocked != nil {
 			return blocked, nil
 		}
-		// Opt-in zero-config: background-index an untracked cwd on the first
-		// tool call (GORTEX_AUTOINDEX=1). Cheap getenv + sync.Once on the
-		// request path; all real work runs on a background goroutine.
-		s.maybeAutoIndexCWD()
+		batchPoll, batchErr := s.batchRequestPoll(&req)
+		if batchErr != nil {
+			return mcp.NewToolResultError(batchErr.Error()), nil
+		}
+		if batchPoll {
+			ctx = withBatchCatalogOnlyLookup(ctx)
+		}
+		// Receipt polling must not initiate unrelated indexing, even when
+		// zero-config auto-indexing is explicitly enabled for other tools.
+		if !batchPoll {
+			s.maybeAutoIndexCWD()
+		}
 		// Every bounded file-summary lookup descended from this tools/call
 		// shares one request-local allowance. Overlay preparation and facade
 		// forwarding derive child contexts, so the pointer survives both paths;
@@ -166,6 +174,9 @@ func (s *Server) wrapToolHandlerMode(h mcpserver.ToolHandlerFunc, injectOverlay 
 		// gates below read that name rather than resolving it twice.
 		legacyName, _ := s.legacyToolName(&req)
 		controlOperation := checkoutControlOperationName(legacyName)
+		if batchPoll {
+			controlOperation = "mutation_status"
+		}
 		if controlOperation != "" {
 			control, controlErr := s.resolveCheckoutControlScope(ctx, selector, &req)
 			if controlErr != nil {

@@ -21,7 +21,11 @@ var errAnalysisGenerationUnavailable = errors.New("active analysis generation is
 // graph token remains current; a graph mutation invalidates both the SQLite
 // active pointer and this in-memory receipt.
 func (s *Server) activeAnalysisQuery() (graph.AnalysisQueryStore, graph.AnalysisGenerationHeader, bool) {
-	s.analysisMu.RLock()
+	// Optional generation evidence must never queue behind RunAnalysis, which
+	// holds the writer lock across whole-graph computation and persistence.
+	if !s.analysisMu.TryRLock() {
+		return nil, graph.AnalysisGenerationHeader{}, false
+	}
 	defer s.analysisMu.RUnlock()
 	if !s.analysisGenerationReady || s.analysisGeneration.GenerationID <= 0 ||
 		s.analysisGeneration.FormatVersion != analysisGenerationFormatVersion ||
@@ -124,18 +128,6 @@ func (s *Server) analysisProcessSteps(processID string, limit, cursorOrdinal int
 		return nil, cursorOrdinal, errAnalysisGenerationUnavailable
 	}
 	return query.AnalysisProcessSteps(header.GenerationID, processID, boundedAnalysisLimit(limit), cursorOrdinal)
-}
-
-func (s *Server) analysisProcessesForNodes(nodeIDs []string) ([]graph.AnalysisProcessMembership, error) {
-	ids, err := boundedAnalysisIDs(nodeIDs)
-	if err != nil || len(ids) == 0 {
-		return nil, err
-	}
-	query, header, ok := s.activeAnalysisQuery()
-	if !ok {
-		return nil, errAnalysisGenerationUnavailable
-	}
-	return query.AnalysisProcessesForNodes(header.GenerationID, ids)
 }
 
 // releaseTransientAnalysisIfIdle drops request-scoped compatibility views only

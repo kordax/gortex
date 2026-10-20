@@ -14,6 +14,13 @@ import (
 // All other source operations continue to fail closed in the mutation guard.
 func (s *Server) prepareRoutedViewMutation(ctx context.Context, req *mcp.CallToolRequest) (context.Context, func(), *mcp.CallToolResult) {
 	noop := func() {}
+	poll, pollErr := s.batchRequestPoll(req)
+	if pollErr != nil {
+		return ctx, noop, mcp.NewToolResultError(pollErr.Error())
+	}
+	if poll {
+		return ctx, noop, nil
+	}
 	view := requestViewFromContext(ctx)
 	if !s.facades.mutatesSource(req.Params.Name) || !view.routed() ||
 		view.rider == nil || !view.rider.Exact || view.viewRoot == "" ||

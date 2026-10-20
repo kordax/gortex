@@ -47,6 +47,7 @@ type mutationReindexOutcome struct {
 	Generation        uint64
 	AppliedGeneration uint64
 	Err               error
+	skipReason        string
 	// A checkout generation is not reflected in the canonical syntax-health
 	// reader. Do not attach another checkout's parse errors to this result.
 	checkoutScoped      bool
@@ -71,6 +72,12 @@ type mutationReceipt struct {
 
 type mutationScheduler interface {
 	EnqueueFileMutation(context.Context, string) (*indexer.MutationTicket, error)
+}
+
+// A nil admission ticket alone says nothing about whether indexing is needed.
+// This optional capability can prove a narrowly defined excluded-file no-op.
+type mutationExclusionProof interface {
+	CanSkipFileMutation(context.Context, string) (bool, error)
 }
 
 // mutationPathKey resolves aliases of the parent directory while preserving
@@ -475,6 +482,13 @@ func (s *Server) mutationReindexState(ctx context.Context, absPath string) mutat
 					return receipt.outcome(true)
 				}
 			}
+			if proof, ok := watcher.(mutationExclusionProof); ok {
+				// Unknown/failed proof preserves the existing required fallback.
+				// In particular, a nil ticket is not an excluded-file receipt.
+				if skip, err := proof.CanSkipFileMutation(ctx, absPath); err == nil && skip {
+					return mutationReindexOutcome{skipReason: "excluded"}
+				}
+			}
 		}
 	}
 	if err := ctx.Err(); err != nil {
@@ -711,6 +725,10 @@ func (s *Server) attachMutationFreshness(resp map[string]any, relPath, absPath s
 	// reads next to disk_status (mutation_commit.go) rather than having to be
 	// inferred from the reindexed / reindex_pending / reindex_error triple.
 	resp["graph_status"] = graphStatusFor(outcome)
+	if outcome.skipReason != "" {
+		resp["reindex_skipped"] = true
+		resp["reindex_skip_reason"] = outcome.skipReason
+	}
 	if outcome.Generation > 0 {
 		resp["reindex_generation"] = outcome.Generation
 	}

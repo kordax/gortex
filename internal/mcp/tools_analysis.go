@@ -455,6 +455,7 @@ func (s *Server) handleDetectChanges(ctx context.Context, req mcp.CallToolReques
 		"repo":      repoPrefix,
 		"repo_root": repoRoot,
 	}
+	applyImpactAnalysisAvailability(detectResult, impact)
 	applyImpactDepthPaging(detectResult, impact.ByDepth,
 		req.GetBool("summary_only", false),
 		req.GetInt("offset", 0),

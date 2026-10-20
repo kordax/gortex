@@ -101,6 +101,12 @@ func (s *Server) handlePromptPreCommit(ctx context.Context, req mcp.GetPromptReq
 		symbolIDs[i] = cs.ID
 	}
 	impact := s.analyzeImpactLazy(ctx, symbolIDs)
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if impact.AnalysisStatus != "" {
+		fmt.Fprintf(&b, "**Analysis %s (incomplete):** %s\n\n", impact.AnalysisStatus, impact.AnalysisDetail)
+	}
 
 	fmt.Fprintf(&b, "**Risk: %s**\n\n", impact.Risk)
 	fmt.Fprintf(&b, "Changed: %d symbols in %d files\n\n", len(diff.ChangedSymbols), len(diff.ChangedFiles))
@@ -279,6 +285,12 @@ func (s *Server) handlePromptSafeToChange(ctx context.Context, req mcp.GetPrompt
 	}
 
 	impact := s.analyzeImpactLazy(ctx, validIDs)
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if impact.AnalysisStatus != "" {
+		fmt.Fprintf(&b, "**Analysis %s (incomplete):** %s\n\n", impact.AnalysisStatus, impact.AnalysisDetail)
+	}
 
 	fmt.Fprintf(&b, "**Risk: %s**\n\n", impact.Risk)
 	fmt.Fprintf(&b, "Symbols to change: %s\n\n", strings.Join(validIDs, ", "))

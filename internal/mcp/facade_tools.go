@@ -1130,7 +1130,18 @@ func (s *Server) invokeFacadeSpec(ctx context.Context, req mcpgo.CallToolRequest
 		outcome = facadeOutcomeInvalidArgument
 		return invalid, nil
 	}
-	if !facadeLegacyManagesOwnOverlay(spec.Legacy) {
+	batchPoll := false
+	if spec.Legacy == "batch_edit" {
+		if envelopeErr := validateBatchFacadeEnvelope(req.GetArguments()); envelopeErr != nil {
+			return mcpgo.NewToolResultError(envelopeErr.Error()), nil
+		}
+		intent, intentErr := classifyBatchArguments(normalized)
+		if intentErr != nil {
+			return mcpgo.NewToolResultError(intentErr.Error()), nil
+		}
+		batchPoll = intent == batchRequestPoll
+	}
+	if !facadeLegacyManagesOwnOverlay(spec.Legacy) && !batchPoll {
 		var viewErr error
 		ctx, _, viewErr = s.prepareOverlayRequest(ctx)
 		if viewErr != nil {

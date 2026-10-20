@@ -1741,6 +1741,68 @@ func (w *Watcher) EnqueueFileMutation(ctx context.Context, filePath string) (*Mu
 	return ticket, nil
 }
 
+// CanSkipFileMutation proves that a nil ticket needs no synchronous fallback.
+// Only an existing regular, canonically spelled file excluded by both watcher
+// and indexer policy qualifies. Old graph nodes still require reconciliation.
+func (w *Watcher) CanSkipFileMutation(ctx context.Context, filePath string) (bool, error) {
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	idx := w.currentMutationIndexer()
+	if idx == nil {
+		return false, nil
+	}
+	root := idx.RootPath()
+	if root == "" {
+		return false, nil
+	}
+	absPath, err := filepath.Abs(filePath)
+	if err != nil {
+		return false, err
+	}
+	rel, err := filepath.Rel(root, absPath)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return false, err
+	}
+	info, err := os.Lstat(absPath)
+	if err != nil {
+		return false, err
+	}
+	if !info.Mode().IsRegular() {
+		return false, nil
+	}
+	canonical, err := filepath.EvalSymlinks(absPath)
+	if err != nil {
+		return false, err
+	}
+	if filepath.Clean(canonical) != filepath.Clean(absPath) {
+		return false, nil
+	}
+	if w.excludes == nil || !w.excludes.MatchAbs(absPath, root) {
+		return false, nil
+	}
+	matcher := idx.excludeMatcher()
+	if matcher == nil || !matcher.MatchAbsDir(absPath, root, false) {
+		return false, nil
+	}
+	// No watcher/cache state mutex is held while querying the graph.
+	key := idx.prefixPath(idx.relKey(absPath))
+	reader, ok := idx.graph.(interface {
+		FindFileNodesBounded(context.Context, string, graph.LocalizationNodeScope, int) (graph.BoundedNodeProjection, error)
+	})
+	if !ok {
+		return false, nil
+	}
+	page, err := reader.FindFileNodesBounded(ctx, key, graph.LocalizationNodeScope{}, 1)
+	if err != nil {
+		return false, err
+	}
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	return len(page.Nodes) == 0 && page.Total == 0 && !page.Truncated, nil
+}
+
 // scheduleFileMutation is the single admission point for native events and
 // direct daemon mutations. A later admission supersedes every queued callback
 // for the same path; every earlier ticket stays attached until the newest patch

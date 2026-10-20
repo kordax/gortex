@@ -459,6 +459,11 @@ type ReviewReceipt struct {
 	CommunitySpan   int             `json:"community_span"`
 	SecurityFlagged bool            `json:"security_flagged"`
 	TopFactors      []ReceiptFactor `json:"top_factors"`
+	// Incomplete optional analysis cannot attest merge readiness. These fields
+	// use fixed vocabulary and retain the receipt's privacy-safe contract.
+	AnalysisStatus string `json:"analysis_status,omitempty"`
+	Complete       *bool  `json:"complete,omitempty"`
+	LowerBound     bool   `json:"lower_bound,omitempty"`
 }
 
 // BuildReviewReceipt projects an already-computed PR-risk result into a small,

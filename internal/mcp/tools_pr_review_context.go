@@ -83,6 +83,8 @@ type prReviewContext struct {
 	Guards         []analysis.GuardViolation `json:"guards,omitempty"`
 	Simulation     *prReviewSimulation       `json:"simulation,omitempty"`
 	ConfigAudit    *audit.Report             `json:"config_audit,omitempty"`
+	// Availability is wire-projected only when optional analysis is incomplete.
+	Availability *analysis.ImpactResult `json:"-"`
 }
 
 // diffContextSymbol is the graph-enriched view of one changed symbol: its
@@ -232,14 +234,19 @@ func (s *Server) handlePRReviewContext(ctx context.Context, req mcp.CallToolRequ
 		}
 	}
 
-	communities, processes, err := s.analysisMembershipsForNodes(ctx, ids)
-	if err != nil {
-		return mcp.NewToolResultError(err.Error()), nil
+	communities, processes, membershipErr := s.analysisMembershipsForNodes(ctx, ids)
+	if membershipErr != nil && !isAnalysisEvidenceUnavailable(membershipErr) {
+		return mcp.NewToolResultError(membershipErr.Error()), nil
 	}
 
 	// --- composite impact (verdict input; also exposed) ---
 	if len(ids) > 0 {
 		imp := diffImpactContext(ctx, s.readerFor(ctx), ids, communities, processes)
+		if membershipErr != nil {
+			markImpactAnalysisUnavailable(imp, membershipErr)
+			out.Availability = imp
+			out.Gates = append(out.Gates, reviewGate{Name: "analysis", Status: prReviewWarn, Detail: imp.AnalysisDetail})
+		}
 		out.Impact = &prReviewImpact{
 			Risk:          string(imp.Risk),
 			TotalAffected: imp.TotalAffected,
@@ -706,5 +713,6 @@ func prReviewContextPayload(out prReviewContext) map[string]any {
 	if out.ConfigAudit != nil {
 		m["config_audit"] = out.ConfigAudit
 	}
+	applyImpactAnalysisAvailability(m, out.Availability)
 	return m
 }

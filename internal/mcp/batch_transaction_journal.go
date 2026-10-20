@@ -93,7 +93,7 @@ func (s *Server) loadOrCreateBatchTransaction(ctx context.Context, transactionID
 		if !valid {
 			return nil, "", fmt.Errorf("invalid transaction state for %q", transactionID)
 		}
-		if err := guardBatchCheckout(ctx, state.snapshot()); err != nil {
+		if err := s.guardBatchTransactionAuthority(ctx, state.snapshot()); err != nil {
 			return nil, "", err
 		}
 		if fingerprint != "" && state.fingerprint != fingerprint {
@@ -107,12 +107,12 @@ func (s *Server) loadOrCreateBatchTransaction(ctx context.Context, transactionID
 		return nil, "", err
 	}
 	if found {
-		if err := guardBatchCheckout(ctx, persisted); err != nil {
+		if err := s.guardBatchTransactionAuthority(ctx, persisted); err != nil {
 			return nil, "", err
 		}
 		// Completion handles are daemon-local and may be reused after restart.
-		// A loaded checkout manifest must re-admit publication on its own lease.
-		if persisted.CheckoutID != "" && persisted.GraphStatus != "fresh" {
+		// A loaded manifest must re-admit publication in the current daemon.
+		if persisted.GraphStatus != "fresh" {
 			for i := range persisted.Files {
 				persisted.Files[i].ReindexReceipt = ""
 				persisted.Files[i].ReindexGeneration = 0
@@ -158,6 +158,11 @@ func (s *Server) loadOrCreateBatchTransaction(ctx context.Context, transactionID
 			return nil, "", fmt.Errorf("checkout batch requires a checkout identity and incarnation")
 		}
 		receipt.CheckoutID, receipt.CheckoutIncarnation, receipt.CheckoutRoot = scope.checkoutID, scope.incarnation, scope.root
+	}
+	if receipt.CheckoutID == "" {
+		if err := s.stampBatchCanonicalOrigin(ctx, &receipt); err != nil {
+			return nil, "", err
+		}
 	}
 	state := &batchTransactionState{fingerprint: fingerprint, done: make(chan struct{}), receipt: receipt}
 	actual, loaded := s.batchTransactions.LoadOrStore(transactionID, state)
@@ -331,7 +336,7 @@ func (s *Server) rollbackBatchReceipt(receipt batchTransactionReceipt) (string, 
 
 func (s *Server) recoverBatchTransaction(ctx context.Context, state *batchTransactionState) {
 	receipt := state.snapshot()
-	if err := guardBatchCheckout(ctx, receipt); err != nil {
+	if err := s.guardBatchTransactionAuthority(ctx, receipt); err != nil {
 		return
 	}
 	paths := make([]string, 0, len(receipt.Files))

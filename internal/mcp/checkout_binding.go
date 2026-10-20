@@ -38,7 +38,9 @@ func (s *Server) checkoutForRequestPath(ctx context.Context, path string) (store
 			return checkout, true, nil
 		}
 	}
-	if s.lifecycle == nil {
+	// Pure batch polls and origin proof must also stay read-only through
+	// nested session-scope binding. A miss never observes or activates Git.
+	if batchCatalogOnlyLookup(ctx) || s.lifecycle == nil {
 		return store_sqlite.Checkout{}, false, parentErr
 	}
 	// CWD observation establishes a session's scope. A different explicit

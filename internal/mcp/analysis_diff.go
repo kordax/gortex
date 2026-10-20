@@ -2,12 +2,17 @@ package mcp
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/zzet/gortex/internal/analysis"
 	"github.com/zzet/gortex/internal/graph"
 )
+
+var errAnalysisPending = errors.New("graph analysis is running; community and process evidence is pending")
 
 // analysisMembershipsForNodes reuses current full views, but never hydrates them.
 // Returned partial views are local to this request and must not be installed.
@@ -15,7 +20,9 @@ func (s *Server) analysisMembershipsForNodes(ctx context.Context, nodeIDs []stri
 	if err := ctx.Err(); err != nil {
 		return nil, nil, err
 	}
-	s.analysisMu.RLock()
+	if !s.analysisMu.TryRLock() {
+		return nil, nil, errAnalysisPending
+	}
 	var communities *analysis.CommunityResult
 	var processes *analysis.ProcessResult
 	if s.analysisSnapshotCurrentLocked() {
@@ -27,7 +34,7 @@ func (s *Server) analysisMembershipsForNodes(ctx context.Context, nodeIDs []stri
 	}
 	query, header, ok := s.activeAnalysisQuery()
 	if !ok {
-		return communities, processes, nil
+		return communities, processes, errAnalysisGenerationUnavailable
 	}
 	needCommunities, needProcesses := communities == nil, processes == nil
 	if needCommunities {
@@ -55,7 +62,7 @@ func (s *Server) analysisMembershipsForNodes(ctx context.Context, nodeIDs []stri
 			if needProcesses {
 				processes = nil
 			}
-			return communities, processes, nil
+			return communities, processes, fmt.Errorf("%w: %w", errAnalysisGenerationUnavailable, err)
 		}
 		for _, row := range rows {
 			if needCommunities && row.CommunityID != "" {
@@ -72,7 +79,7 @@ func (s *Server) analysisMembershipsForNodes(ctx context.Context, nodeIDs []stri
 	// Do not return rows from a generation invalidated during the query.
 	_, current, ok := s.activeAnalysisQuery()
 	if !ok || current.GenerationID != header.GenerationID {
-		return nil, nil, nil
+		return nil, nil, errAnalysisGenerationUnavailable
 	}
 	return communities, processes, nil
 }
@@ -86,6 +93,13 @@ func diffImpactContext(ctx context.Context, reader graph.Reader, ids []string, c
 
 func (s *Server) analyzeDiffImpact(ctx context.Context, symbolIDs []string) (*analysis.ImpactResult, error) {
 	result := diffImpactContext(ctx, s.readerFor(ctx), symbolIDs, nil, nil)
+	return result, s.enrichImpactMemberships(ctx, result, symbolIDs)
+}
+
+// enrichImpactMemberships adds only bounded optional rows, never full-generation
+// compatibility views. Missing evidence remains explicit rather than becoming a
+// claim that no community or process is affected.
+func (s *Server) enrichImpactMemberships(ctx context.Context, result *analysis.ImpactResult, symbolIDs []string) error {
 	ids := append([]string(nil), symbolIDs...)
 	for depth := 1; depth <= 3; depth++ {
 		for _, entry := range result.ByDepth[depth] {
@@ -94,7 +108,10 @@ func (s *Server) analyzeDiffImpact(ctx context.Context, symbolIDs []string) (*an
 	}
 	communities, processes, err := s.analysisMembershipsForNodes(ctx, ids)
 	if err != nil {
-		return nil, err
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		markImpactAnalysisUnavailable(result, err)
 	}
 	commSet, procSet := make(map[string]bool), make(map[string]bool)
 	for _, id := range ids {
@@ -117,5 +134,26 @@ func (s *Server) analyzeDiffImpact(ctx context.Context, symbolIDs []string) (*an
 	}
 	sort.Strings(result.AffectedCommunities)
 	sort.Strings(result.AffectedProcesses)
-	return result, ctx.Err()
+	return ctx.Err()
+}
+
+func markImpactAnalysisUnavailable(result *analysis.ImpactResult, err error) {
+	previousDetail := result.AnalysisDetail
+	if result.StructuralComplete == nil {
+		structuralComplete := !result.LowerBound && !result.Truncated
+		result.StructuralComplete = &structuralComplete
+	}
+	result.LowerBound = true
+	result.AnalysisStatus = "unavailable"
+	if errors.Is(err, errAnalysisPending) {
+		result.AnalysisStatus = "pending"
+	}
+	result.AnalysisDetail = "Community and process evidence is " + result.AnalysisStatus + "; structural impact remains available"
+	if err != nil {
+		result.AnalysisDetail += ": " + err.Error()
+	}
+	if previousDetail != "" {
+		result.Summary = strings.TrimSuffix(result.Summary, "; "+previousDetail)
+	}
+	result.Summary += "; " + result.AnalysisDetail
 }

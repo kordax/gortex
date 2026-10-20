@@ -54,7 +54,7 @@ func verifyBatchAfterImages(files []batchTransactionFile) error {
 // A batch publishes one checkout snapshot, including deletion tombstones. Never
 // enqueue its paths on the primary watcher or wait while owning the route lease.
 func (s *Server) refreshCheckoutBatchGraph(ctx context.Context, state *batchTransactionState, receipt batchTransactionReceipt) {
-	err := guardBatchCheckout(ctx, receipt)
+	err := s.guardBatchTransactionAuthority(ctx, receipt)
 	var outcome mutationReindexOutcome
 	if err == nil && len(receipt.Files) == 0 {
 		err = fmt.Errorf("checkout batch has no committed files")

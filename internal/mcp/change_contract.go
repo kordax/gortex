@@ -778,6 +778,13 @@ func (s *Server) assembleEnvelope(ctx context.Context, p *prediction, violations
 	risk := s.scoreChangeRisk(p)
 	verdict := verdictAllow
 	var reasons []changeReason
+	if p.impact != nil && p.impact.AnalysisStatus != "" {
+		verdict = verdictWarn
+		reasons = append(reasons, changeReason{
+			Family: "analysis", Severity: "warn", Confidence: 1,
+			Message: p.impact.AnalysisDetail + "; risk score is a lower bound",
+		})
+	}
 
 	for _, v := range violations {
 		sev := severityForViolation(v)
@@ -882,6 +889,7 @@ func (s *Server) assembleEnvelope(ctx context.Context, p *prediction, violations
 			"test_files":           p.impact.TestFiles,
 			"lower_bound":          p.impact.LowerBound,
 		}
+		applyImpactAnalysisAvailability(env.Blast, p.impact)
 	}
 	if env.ChangedSymbols == nil {
 		env.ChangedSymbols = []changedSymbolRef{}
@@ -903,10 +911,16 @@ func (s *Server) handleChangeContract(ctx context.Context, req mcp.CallToolReque
 		}
 		return mcp.NewToolResultError(err.Error()), nil
 	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if req.GetBool("ack", false) {
 		return s.handleRiskAck(ctx, req, p)
 	}
 	violations := s.evaluateChange(ctx, p)
 	env := s.assembleEnvelope(ctx, p, violations)
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	return s.respondJSONOrTOON(ctx, req, env)
 }

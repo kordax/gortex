@@ -283,22 +283,48 @@ func TestChangedSymbolsForFilesReflectsOverlay(t *testing.T) {
 // Reverting it to s.graph reads the indexed tests edge and calls a change
 // merge-ready whose buffer has already deleted the only covering test.
 func TestReviewReceiptReflectsOverlay(t *testing.T) {
-	srv, layer := reviewQuestionsFixture(t)
-	diff := &analysis.DiffResult{
-		ChangedFiles:   []string{"p/hub.go"},
-		ChangedSymbols: []analysis.ChangedSymbol{{ID: rqHubID, Name: "Hub", FilePath: "p/hub.go"}},
+	for _, ready := range []bool{false, true} {
+		name := "analysis_unavailable"
+		if ready {
+			name = "analysis_ready"
+		}
+		t.Run(name, func(t *testing.T) {
+			srv, layer := reviewQuestionsFixture(t)
+			if ready {
+				srv.RunAnalysis()
+			}
+			diff := &analysis.DiffResult{
+				ChangedFiles:   []string{"p/hub.go"},
+				ChangedSymbols: []analysis.ChangedSymbol{{ID: rqHubID, Name: "Hub", FilePath: "p/hub.go"}},
+			}
+			ids := []string{rqHubID}
+			onBase := srv.reviewReceipt(t.Context(), ids, diff, nil, nil, false)
+			assert.Equal(t, 0, onBase.UncoveredCount, "the indexed tests edge covers the hub")
+			if ready {
+				assert.Equal(t, "merge-ready", onBase.NextSafeAction)
+				assert.Empty(t, onBase.AnalysisStatus)
+				assert.Nil(t, onBase.Complete)
+				assert.False(t, onBase.LowerBound)
+			} else {
+				assert.Equal(t, "retry_analysis", onBase.NextSafeAction)
+				assert.Equal(t, "unavailable", onBase.AnalysisStatus)
+				require.NotNil(t, onBase.Complete)
+				assert.False(t, *onBase.Complete)
+				assert.True(t, onBase.LowerBound)
+			}
+			assert.False(t, onBase.MergeBlocker, "optional unavailable analysis must not introduce a hard merge gate")
+			assert.Empty(t, onBase.BlockerReason)
+
+			onView := srv.reviewReceipt(overlayCtx(t, srv, layer), ids, diff, nil, nil, false)
+			assert.Equal(t, 1, onView.UncoveredCount, "deleting the covering test in the buffer must leave the hub uncovered")
+			assert.Equal(t, "add-tests", onView.NextSafeAction, "the receipt must ask for tests the buffer no longer has")
+			assert.False(t, onView.MergeBlocker)
+			assert.Empty(t, onView.BlockerReason)
+			assert.Equal(t, onBase.AnalysisStatus, onView.AnalysisStatus)
+			assert.Equal(t, onBase.Complete, onView.Complete)
+			assert.Equal(t, onBase.LowerBound, onView.LowerBound)
+			assert.Len(t, srv.graph.AllNodes(), 4, "the overlay request must not mutate the base store")
+			assert.Equal(t, onBase, srv.reviewReceipt(t.Context(), ids, diff, nil, nil, false), "the base receipt must remain unchanged after the overlay request")
+		})
 	}
-	ids := []string{rqHubID}
-
-	onBase := srv.reviewReceipt(context.Background(), ids, diff, nil, nil, false)
-	assert.Equal(t, 0, onBase.UncoveredCount, "the indexed tests edge covers the hub")
-	assert.Equal(t, "merge-ready", onBase.NextSafeAction)
-
-	onView := srv.reviewReceipt(overlayCtx(t, srv, layer), ids, diff, nil, nil, false)
-	assert.Equal(t, 1, onView.UncoveredCount,
-		"deleting the covering test in the buffer must leave the hub uncovered")
-	assert.Equal(t, "add-tests", onView.NextSafeAction,
-		"the receipt must ask for tests the buffer no longer has")
-
-	assert.Len(t, srv.graph.AllNodes(), 4, "the overlay request must not mutate the base store")
 }

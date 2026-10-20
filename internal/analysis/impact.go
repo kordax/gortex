@@ -56,6 +56,12 @@ type ImpactResult struct {
 	// floor, so an agent can act on them (e.g. find_implementations on the
 	// interface). Omitted when empty.
 	Boundaries []graph.EpistemicBoundary `json:"boundaries,omitempty"`
+	// AnalysisStatus is present only when optional community/process evidence
+	// is pending or unavailable. StructuralComplete preserves the traversal's
+	// own completeness separately from the aggregate lower bound.
+	AnalysisStatus     string `json:"analysis_status,omitempty"`
+	AnalysisDetail     string `json:"analysis_detail,omitempty"`
+	StructuralComplete *bool  `json:"structural_complete,omitempty"`
 }
 
 // AnalyzeImpact performs depth-tiered blast radius analysis on a set of symbols.

@@ -296,13 +296,14 @@ func (s *Server) registerEnhancementTools() {
 	// batch_edit
 	s.addTool(
 		mcp.NewTool("batch_edit",
-			mcp.WithDescription("Atomically applies a dependency-ordered edit set. Every guard and replacement is evaluated against one locked snapshot before any file is written; a commit failure restores all touched files. The durable transaction receipt survives response loss and daemon restart. Retry with the same transaction_id and identical edits to receive the original result without writing again, or omit edits and pass transaction_id to query status. Each edit is one of four operations selected by `op`:\n  • edit_symbol (default): {id, old_source, new_source} — replace a fragment inside a symbol's body.\n  • edit_file: {op:\"edit_file\", path, old_string, new_string, replace_all?} — replace a string in any file (imports, config, comments).\n  • move_file: {op:\"move_file\", source, destination, expected_sha256?} — move one regular file without overwriting the destination.\n  • delete_file: {op:\"delete_file\", path, expected_sha256?} — delete one regular file.\nPass `edits` as a JSON array of objects (a JSON-encoded string is accepted for compatibility)."),
+			mcp.WithDescription("Atomic dependency-ordered edits over one locked snapshot. Validate guards/replacements before writing; commit failure restores all touched files. Durable receipts survive response loss and daemon restart. Identical edits with the same ID reuse the result. Select four operations with op: edit_symbol (default), edit_file, move_file, delete_file. Move/delete require regular files; move never overwrites. Accepts arrays or JSON-encoded arrays."),
 			mcp.WithArray("edits",
-				mcp.Description("Edit operations. Required for execution; omit only when querying an existing transaction. Each item is an edit_symbol, edit_file, move_file, or delete_file object selected by `op`."),
+				mcp.Description("Operations required for execution; omit for status/recovery. Select edit_symbol, edit_file, move_file or delete_file with op."),
 				mcp.Items(batchEditItemsSchema()),
 			),
-			mcp.WithString("transaction_id", mcp.Description("Stable caller-chosen idempotency key. Reusing it with identical edits returns the same receipt; a different payload is rejected. When omitted, the server creates a unique transaction ID.")),
-			mcp.WithBoolean("status_only", mcp.Description("Query transaction_id without executing edits. Edits may also simply be omitted.")),
+			mcp.WithString("transaction_id", mcp.Description("Idempotency key: identical edits reuse the receipt; different payload is rejected. Omitted execution IDs are generated.")),
+			mcp.WithBoolean("status_only", mcp.Description("Read snapshot without waiting, recovery or enqueue. Requires transaction_id and no edits; excludes resume:true.")),
+			mcp.WithBoolean("resume", mcp.Description("Recover/retry graph publication. Requires transaction_id and no edits; excludes status_only:true. No edits/flags retains legacy recovery.")),
 			mcp.WithBoolean("dry_run", mcp.Description("Return the dependency-ordered plan without applying changes")),
 			mcp.WithBoolean("compact", mcp.Description("One-line transaction and per-edit summary")),
 		),
@@ -2930,10 +2931,11 @@ func (s *Server) handleDiffContext(ctx context.Context, req mcp.CallToolRequest)
 	for _, cs := range diff.ChangedSymbols {
 		ids = append(ids, cs.ID)
 	}
-	communities, processes, err := s.analysisMembershipsForNodes(ctx, ids)
-	if err != nil {
-		return mcp.NewToolResultError(err.Error()), nil
+	communities, processes, membershipErr := s.analysisMembershipsForNodes(ctx, ids)
+	if membershipErr != nil && !isAnalysisEvidenceUnavailable(membershipErr) {
+		return mcp.NewToolResultError(membershipErr.Error()), nil
 	}
+	availability := &analysis.ImpactResult{}
 
 	// Build enriched symbol info. The lookups run on the request's
 	// reader, matching the caller/chain walks below which already go
@@ -3026,6 +3028,8 @@ func (s *Server) handleDiffContext(ctx context.Context, req mcp.CallToolRequest)
 			symbolIDs[i] = sym.ID
 		}
 		impact := diffImpactContext(ctx, reader, symbolIDs, communities, processes)
+		availability.LowerBound = availability.LowerBound || impact.LowerBound
+		availability.Truncated = availability.Truncated || impact.Truncated
 
 		groups = append(groups, diffFileGroup{
 			FilePath: fp,
@@ -3073,8 +3077,14 @@ func (s *Server) handleDiffContext(ctx context.Context, req mcp.CallToolRequest)
 		return mcp.NewToolResultError(err.Error()), nil
 	}
 
+	if membershipErr != nil {
+		markImpactAnalysisUnavailable(availability, membershipErr)
+	}
 	if isCompact(req) {
 		var b strings.Builder
+		if availability.AnalysisStatus != "" {
+			fmt.Fprintf(&b, "analysis_status=%s complete=false lower_bound=true structural_complete=%t: %s\n", availability.AnalysisStatus, *availability.StructuralComplete, availability.AnalysisDetail)
+		}
 		for _, g := range groups {
 			for _, sym := range g.Symbols {
 				fmt.Fprintf(&b, "%s %s %s callers=%d callees=%d\n",
@@ -3087,12 +3097,14 @@ func (s *Server) handleDiffContext(ctx context.Context, req mcp.CallToolRequest)
 		return mcp.NewToolResultText(b.String()), nil
 	}
 
-	return s.respondJSONOrTOON(ctx, req, map[string]any{
+	payload := map[string]any{
 		"files":         groups,
 		"total_symbols": totalSymbols,
 		"total_files":   len(groups),
 		"truncated":     truncated,
-	})
+	}
+	applyImpactAnalysisAvailability(payload, availability)
+	return s.respondJSONOrTOON(ctx, req, payload)
 }
 
 // ---------------------------------------------------------------------------
