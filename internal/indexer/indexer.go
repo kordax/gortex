@@ -9005,7 +9005,7 @@ func (idx *Indexer) HasChangesSinceMtimes(root string) bool {
 	errStop := errors.New("stop-walk")
 	walkErr := filepath.WalkDir(absRoot, func(path string, d os.DirEntry, werr error) error {
 		if werr != nil {
-			return nil
+			return werr
 		}
 		if d.IsDir() {
 			if idx.shouldPruneDir(path, absRoot) {
@@ -9013,10 +9013,10 @@ func (idx *Indexer) HasChangesSinceMtimes(root string) bool {
 			}
 			return nil
 		}
-		if _, ok := idx.effectiveLanguage(path, nil); !ok {
-			return nil
-		}
-		if idx.shouldExclude(path, absRoot, false) {
+		// Reuse the full walk's exclusion-before-sniff ordering and the
+		// entry's already-known type. Ignored files and escaping symlinks
+		// must not be opened merely to decide whether they are source.
+		if !idx.admitWalkFileKnownType(absRoot, path, -1, d.Type()).admit {
 			return nil
 		}
 		rel := idx.relKey(path)
@@ -9161,13 +9161,14 @@ func (idx *Indexer) changedSinceMtimesCensus(root string) (
 			}
 			return nil
 		}
-		lang, supported := idx.effectiveLanguage(path, nil)
-		if !supported && !idx.isIncrementalContractManifest(path) {
+		// Keep the same admission order as cold/scoped walks: exclusions
+		// and symlink confinement precede any prefix read for language sniffing.
+		// Size policy remains below, using the census's fresh follow-stat.
+		admission := idx.admitWalkFileKnownType(absRoot, path, -1, d.Type())
+		if admission.excluded || (!admission.admit && !idx.isIncrementalContractManifest(path)) {
 			return nil
 		}
-		if idx.shouldExclude(path, absRoot, false) {
-			return nil
-		}
+		lang, supported := admission.lang, admission.admit
 		rel := idx.relKey(path)
 		diskFiles[rel] = true
 		if filepath.Base(filepath.FromSlash(rel)) == "parser.c" {

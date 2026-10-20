@@ -253,6 +253,55 @@ not production SLOs. Cold startup including full enrichment took about two minut
 its sampled CPU profile showed resolver work and SQLite reads. The historical
 59-second MCP timeout was not reproduced, so its exact cause remains unknown.
 
+## Warm filesystem census benchmark
+
+```sh
+GOTOOLCHAIN=go1.27.2 GOMAXPROCS=4 go test ./internal/indexer \
+  -run '^$' -bench '^BenchmarkWarmCensusIgnoredFilesSQLite$' \
+  -benchmem -benchtime=10x -count=3 -timeout=5m
+```
+
+This benchmark publishes 519 generated Go files into private SQLite storage,
+then creates a fresh indexer from persisted file receipts. It compares source
+files alone, 16,384 generated files excluded by filename, and the same generated
+files beneath a pruned directory. Setup, cold parsing and one warm census are
+outside the timer. Every measured iteration must detect all 519 sources and
+return no changed or deleted files. No installed daemon or working repository
+is used.
+
+The census uses the full walk's admission gate: exclusions and symlink
+confinement precede language sniffing. Existing tests retain manifest, shebang,
+negated-descendant, per-directory ignore, symlink, size-policy and deletion
+behavior. Unix subprocess tests prove that an excluded FIFO or a symlink to an
+outside FIFO is never opened; the process timeout prevents a regression from
+hanging the runner.
+
+Capture CPU samples only after fixture setup and warmup:
+
+```sh
+gortex_census_artifacts=$(mktemp -d)
+GOTOOLCHAIN=go1.27.2 GOMAXPROCS=4 \
+GORTEX_CENSUS_CPU_PROFILE="$gortex_census_artifacts/census" \
+go test ./internal/indexer -run '^$' \
+  -bench '^BenchmarkWarmCensusIgnoredFilesSQLite$/ignored_files_16384$' \
+  -benchtime=100x -count=1 -timeout=3m
+go tool pprof -top -cum \
+  "$gortex_census_artifacts/census.ignored_files_16384.n100.pprof"
+```
+
+Use a fresh profile prefix. The benchmark refuses to overwrite files and names
+profiles by case and iteration count, including the calibration run.
+
+On one Linux run with Go 1.27.2 and four Go scheduler threads, the ignored-file
+case's median changed from 45.023 to 25.677 ms per census; allocated bytes changed
+from 17.620 to 5.288 MB per iteration. Source-only timings were effectively
+unchanged. The before profile attributed 59% of sampled CPU to prefix reads;
+afterward the remaining work was mostly ignore matching and directory walking.
+These measurements describe this temporary, warm-cache fixture. They neither
+explain the observed 75-second census of a real repository nor establish a
+production latency target. Census still checks current filesystem metadata;
+the optimization adds no freshness cache or relaxed exclusion policy.
+
 ## Connection cleanup and reconnect records
 
 Status and probe keep the existing `sessions` total and add `socket_sessions`,
