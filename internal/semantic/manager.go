@@ -1381,6 +1381,9 @@ func (m *Manager) EnrichFilesContext(ctx context.Context, g graph.Store, repoPre
 	sort.Strings(files)
 
 	run := func(provider Provider) (*EnrichResult, error) {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		if batch, ok := provider.(ContextFileBatchEnricher); ok {
 			return batch.EnrichFilesContext(ctx, g, repoPrefix, repoRoot, files)
 		}
@@ -1406,6 +1409,11 @@ func (m *Manager) EnrichFilesContext(ctx context.Context, g graph.Store, repoPre
 		primary, primaryErr = run(provider)
 	}
 
+	// A file frontier is complete only when every participating provider
+	// finishes. Preserve the primary result and its committed-work counters,
+	// while accumulating failures/partial state from supplemental providers.
+	incomplete := primaryErr != nil
+	incompleteReason := ""
 	// Supplemental providers preserve EnrichAll parity. Each receives one
 	// batched call when supported, otherwise one repo call for a multi-file
 	// frontier; no provider is invoked once per file.
@@ -1424,7 +1432,15 @@ func (m *Manager) EnrichFilesContext(ctx context.Context, g graph.Store, repoPre
 			continue
 		}
 		result, err := run(provider)
+		if result != nil && result.Partial {
+			incomplete = true
+			if incompleteReason == "" {
+				incompleteReason = provider.Name() + ": " + result.AbortReason
+			}
+		}
 		if err != nil {
+			incomplete = true
+			primaryErr = errors.Join(primaryErr, fmt.Errorf("supplemental provider %s: %w", provider.Name(), err))
 			m.logger.Debug("supplemental incremental enrichment failed",
 				zap.String("provider", provider.Name()),
 				zap.Int("files", len(files)),
@@ -1437,6 +1453,20 @@ func (m *Manager) EnrichFilesContext(ctx context.Context, g graph.Store, repoPre
 		}
 	}
 
+	if err := ctx.Err(); err != nil {
+		incomplete = true
+		primaryErr = errors.Join(primaryErr, err)
+	}
+	if incomplete && primary != nil {
+		// A provider may retain its result for diagnostics. Mark the combined
+		// outcome without poisoning that provider-owned value or a later retry.
+		combined := *primary
+		combined.Partial = true
+		if combined.AbortReason == "" {
+			combined.AbortReason = incompleteReason
+		}
+		primary = &combined
+	}
 	return primary, primaryErr
 }
 

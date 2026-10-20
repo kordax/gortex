@@ -158,7 +158,12 @@ func (p *Provider) EnrichRepoContext(ctx context.Context, g graph.Store, repoPre
 			res.DurationMs = time.Since(start).Milliseconds()
 			return res, nil
 		}
-		mu.Lock()
+		if err := lockResolveContext(ctx, mu); err != nil {
+			res.LockWaitMs = time.Since(lockStart).Milliseconds()
+			markContextPartial(res, err)
+			res.DurationMs = time.Since(start).Milliseconds()
+			return res, nil
+		}
 		lockWait := time.Since(lockStart)
 		res.LockWaitMs = lockWait.Milliseconds()
 		if lockWait > 5*time.Second {
