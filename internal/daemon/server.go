@@ -715,6 +715,25 @@ func (s *Server) handleControlBounded(sess *Session, req ControlRequest) Control
 
 func (s *Server) handleControl(ctx context.Context, _ *Session, req ControlRequest) ControlResponse {
 	switch req.Kind {
+	case ControlDashboard:
+		controller, ok := s.Controller.(DashboardController)
+		if !ok {
+			return controlErr(ErrInternal, "dashboard control is unavailable; update and restart the daemon")
+		}
+		var params DashboardParams
+		if err := unmarshalParams(req.Params, &params); err != nil {
+			return controlErr(ErrInternal, err.Error())
+		}
+		status, err := controller.Dashboard(ctx, params)
+		if err != nil {
+			return controlErr(ErrInternal, err.Error())
+		}
+		result, err := json.Marshal(status)
+		if err != nil {
+			return controlErr(ErrInternal, err.Error())
+		}
+		return ControlResponse{OK: true, Result: result}
+
 	case ControlTrack:
 		var p TrackParams
 		if err := unmarshalParams(req.Params, &p); err != nil {

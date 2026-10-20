@@ -4,6 +4,8 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -11,10 +13,67 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/zzet/gortex/internal/config"
 	"github.com/zzet/gortex/internal/daemon"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zaptest/observer"
 )
+
+func TestDaemonObservabilityDashboardRequiresExplicitConfiguration(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		configured string
+		flag       string
+		envOff     bool
+		wantHTTP   bool
+	}{
+		{name: "default-off"},
+		{name: "config-on", configured: "127.0.0.1:0", wantHTTP: true},
+		{name: "config-off", configured: "off"},
+		{name: "flag-on", flag: "127.0.0.1:0", wantHTTP: true},
+		{name: "env-off-overrides-config", configured: "127.0.0.1:0", envOff: true},
+		{name: "flag-off-overrides-config", configured: "127.0.0.1:0", flag: "off"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("GORTEX_METRICS_ADDR", "")
+			if !tc.envOff {
+				require.NoError(t, os.Unsetenv("GORTEX_METRICS_ADDR"))
+			}
+			t.Setenv("GORTEX_DIAGNOSTICS_ADDR", "")
+			t.Setenv("GORTEX_DAEMON_PPROF_ADDR", "")
+			path := filepath.Join(t.TempDir(), "config.yaml")
+			require.NoError(t, os.WriteFile(path, []byte("daemon:\n  metrics_addr: \""+tc.configured+"\"\n"), 0o600))
+			manager, err := config.NewConfigManager(path)
+			require.NoError(t, err)
+			assert.Equal(t, tc.configured, manager.Global().Daemon.MetricsAddr)
+			previous := daemonMetricsAddr
+			t.Cleanup(func() { daemonMetricsAddr = previous })
+			cmd := &cobra.Command{}
+			cmd.Flags().StringVar(&daemonMetricsAddr, "metrics-addr", "", "")
+			if tc.flag != "" {
+				require.NoError(t, cmd.Flags().Set("metrics-addr", tc.flag))
+			}
+			core, logs := observer.New(zap.InfoLevel)
+			stop, err := startDaemonObservability(cmd, nil, &realController{configManager: manager}, zap.New(core))
+			require.NoError(t, err)
+			t.Cleanup(stop)
+			entries := logs.FilterMessage("daemon: local observability listener").All()
+			if !tc.wantHTTP {
+				assert.Empty(t, entries, "disabled dashboard must not bind an HTTP port")
+				return
+			}
+			require.Len(t, entries, 1)
+			assert.Equal(t, "metrics", entries[0].ContextMap()["kind"])
+			address := entries[0].ContextMap()["address"].(string)
+			client := &http.Client{Timeout: 2 * time.Second, Transport: &http.Transport{Proxy: nil}}
+			defer client.CloseIdleConnections()
+			response, err := client.Get("http://" + address + "/healthz")
+			require.NoError(t, err)
+			assert.Equal(t, http.StatusOK, response.StatusCode)
+			require.NoError(t, response.Body.Close())
+		})
+	}
+}
 
 func TestDaemonObservabilityListenersSeparateProfilesAndStopCleanly(t *testing.T) {
 	t.Setenv("GORTEX_METRICS_ADDR", "127.0.0.1:0")

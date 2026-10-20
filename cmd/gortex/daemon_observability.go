@@ -20,7 +20,7 @@ var daemonMetricsAddr string
 var daemonDiagnosticsAddr string
 
 func init() {
-	daemonStartCmd.Flags().StringVar(&daemonMetricsAddr, "metrics-addr", "127.0.0.1:9474", "local dashboard and Prometheus address (or GORTEX_METRICS_ADDR; off disables HTTP, collection continues)")
+	daemonStartCmd.Flags().StringVar(&daemonMetricsAddr, "metrics-addr", "", "enable local dashboard and Prometheus at this address (or GORTEX_METRICS_ADDR / daemon.metrics_addr; disabled by default, collection continues)")
 	daemonStartCmd.Flags().StringVar(&daemonDiagnosticsAddr, "diagnostics-addr", "", "bounded Go profiles on a separate loopback address, e.g. 127.0.0.1:9475 (or GORTEX_DIAGNOSTICS_ADDR; disabled by default)")
 }
 
@@ -48,18 +48,26 @@ func setupDaemonTracing(logger *zap.Logger) (func(), error) {
 func startDaemonObservability(cmd *cobra.Command, srv *daemon.Server, controller *realController, logger *zap.Logger) (func(), error) {
 	ctx, cancel := context.WithCancel(context.Background())
 	var servers []*http.Server
+	var listeners []net.Listener
 	var history *daemonMetricHistory
+	var dashboard *daemonDashboard
 	var once sync.Once
 	stop := func() {
 		once.Do(func() {
 			cancel()
+			if dashboard != nil {
+				dashboard.close()
+			}
 			pprofAddr.Store("")
 			shutdownCtx, done := context.WithTimeout(context.Background(), 2*time.Second)
 			defer done()
-			for _, server := range servers {
+			for i, server := range servers {
 				if err := server.Shutdown(shutdownCtx); err != nil {
 					_ = server.Close()
 				}
+				// Shutdown cannot see a listener until Serve registers it.
+				// Release the original even when startup is immediately stopped.
+				_ = listeners[i].Close()
 			}
 			if history != nil {
 				history.close()
@@ -90,6 +98,7 @@ func startDaemonObservability(cmd *cobra.Command, srv *daemon.Server, controller
 			BaseContext:       func(_ net.Listener) context.Context { return ctx },
 		}
 		servers = append(servers, server)
+		listeners = append(listeners, listener)
 		if kind == "profiles" {
 			pprofAddr.Store(listener.Addr().String())
 		}
@@ -118,13 +127,22 @@ func startDaemonObservability(cmd *cobra.Command, srv *daemon.Server, controller
 		_, _ = w.Write([]byte("ok\n"))
 	})
 	metricsMux.Handle("/", observability.DashboardHandler(reader, history.current))
-	metricsAddress, explicit := daemonDashboardAddress(cmd, daemonMetricsAddr)
-	if err := start("metrics", metricsAddress, diagnostics.LocalOnly(metricsMux)); err != nil {
-		if explicit {
+	var configuredMetricsAddr string
+	if controller != nil && controller.configManager != nil {
+		if global := controller.configManager.Global(); global != nil {
+			configuredMetricsAddr = global.Daemon.MetricsAddr
+		}
+	}
+	metricsAddress := daemonDashboardAddress(cmd, daemonMetricsAddr, configuredMetricsAddr)
+	dashboard = &daemonDashboard{ctx: ctx, handler: diagnostics.LocalOnly(metricsMux), logger: logger, preferred: metricsAddress}
+	if controller != nil {
+		controller.dashboard = dashboard
+	}
+	if metricsAddress != "" {
+		if _, err := dashboard.apply(ctx, daemon.DashboardParams{Action: "start", Address: metricsAddress}); err != nil {
 			stop()
 			return nil, err
 		}
-		logger.Warn("daemon: default dashboard address unavailable; metric collection continues", zap.String("address", metricsAddress))
 	}
 	profileAddress := address("diagnostics-addr", daemonDiagnosticsAddr, "GORTEX_DIAGNOSTICS_ADDR")
 	if profileAddress == "" && !cmd.Flags().Changed("diagnostics-addr") && os.Getenv("GORTEX_DIAGNOSTICS_ADDR") == "" {
@@ -141,18 +159,14 @@ func startDaemonObservability(cmd *cobra.Command, srv *daemon.Server, controller
 	return stop, nil
 }
 
-func daemonDashboardAddress(cmd *cobra.Command, value string) (string, bool) {
+func daemonDashboardAddress(cmd *cobra.Command, value, configured string) string {
 	if cmd.Flags().Changed("metrics-addr") {
-		if value == "off" {
-			value = ""
-		}
-		return value, true
+		configured = value
+	} else if env, exists := os.LookupEnv("GORTEX_METRICS_ADDR"); exists {
+		configured = env
 	}
-	if configured, exists := os.LookupEnv("GORTEX_METRICS_ADDR"); exists {
-		if configured == "off" {
-			configured = ""
-		}
-		return configured, true
+	if configured == "off" {
+		return ""
 	}
-	return "127.0.0.1:9474", false
+	return configured
 }

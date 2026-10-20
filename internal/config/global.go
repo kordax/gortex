@@ -9,8 +9,8 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/google/renameio"
 	"github.com/go-viper/mapstructure/v2"
+	"github.com/google/renameio"
 	"gopkg.in/yaml.v3"
 
 	"github.com/zzet/gortex/internal/llm"
@@ -118,6 +118,12 @@ type DaemonConfig struct {
 	// overridden by GORTEX_DAEMON_HTTP_ADDR; a non-empty --http-addr flag
 	// overrides both. Non-loopback binds require an auth token.
 	HTTPAddr string `mapstructure:"http_addr" yaml:"http_addr,omitempty"`
+
+	// MetricsAddr enables the loopback dashboard and Prometheus listener.
+	// Empty leaves HTTP disabled; metric collection and daily history continue.
+	// GORTEX_METRICS_ADDR overrides this, and --metrics-addr overrides both.
+	// An explicit empty value or "off" disables the listener.
+	MetricsAddr string `mapstructure:"metrics_addr" yaml:"metrics_addr,omitempty"`
 }
 
 // GlobalMCPConfig is the `mcp:` block in ~/.gortex/config.yaml. It contains

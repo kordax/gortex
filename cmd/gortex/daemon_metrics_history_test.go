@@ -81,28 +81,30 @@ func TestDaemonHistoryCollectsWithoutScrapesAndStops(t *testing.T) {
 	}
 }
 
-func TestDaemonDashboardAddressDefaultAndExplicitOptOut(t *testing.T) {
+func TestDaemonDashboardAddressRequiresOptInAndHonorsPrecedence(t *testing.T) {
 	t.Setenv("GORTEX_METRICS_ADDR", "")
 	require.NoError(t, os.Unsetenv("GORTEX_METRICS_ADDR"))
 	cmd := &cobra.Command{}
-	address, explicit := daemonDashboardAddress(cmd, "unused")
-	assert.Equal(t, "127.0.0.1:9474", address)
-	assert.False(t, explicit)
+	assert.Empty(t, daemonDashboardAddress(cmd, "unused", ""))
+	assert.Empty(t, daemonDashboardAddress(cmd, "unused", "off"))
+	assert.Equal(t, "127.0.0.1:9474", daemonDashboardAddress(cmd, "unused", "127.0.0.1:9474"))
 	for _, value := range []string{"", "off", "127.0.0.1:0"} {
 		t.Setenv("GORTEX_METRICS_ADDR", value)
-		address, explicit = daemonDashboardAddress(cmd, "unused")
 		expected := value
 		if value == "off" {
 			expected = ""
 		}
-		assert.Equal(t, expected, address)
-		assert.True(t, explicit)
+		assert.Equal(t, expected, daemonDashboardAddress(cmd, "unused", "127.0.0.1:9474"))
 	}
 	cmd.Flags().String("metrics-addr", "", "")
-	require.NoError(t, cmd.Flags().Set("metrics-addr", "off"))
-	address, explicit = daemonDashboardAddress(cmd, "off")
-	assert.Empty(t, address)
-	assert.True(t, explicit)
+	for _, value := range []string{"", "off", "127.0.0.1:9476"} {
+		require.NoError(t, cmd.Flags().Set("metrics-addr", value))
+		expected := value
+		if value == "off" {
+			expected = ""
+		}
+		assert.Equal(t, expected, daemonDashboardAddress(cmd, value, "127.0.0.1:9474"))
+	}
 }
 
 func BenchmarkDaemonHistoryCapture(b *testing.B) {

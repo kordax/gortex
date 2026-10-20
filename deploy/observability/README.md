@@ -1,6 +1,34 @@
 # Local Gortex observability
 
-The daemon continuously records lightweight metrics and serves an embedded dashboard at http://127.0.0.1:9474. Open it in a browser; no containers, exporter, cloud account or paid service are required. Prometheus, Grafana and Tempo remain an optional companion stack for additional queries and sampled traces.
+The daemon continuously records lightweight metrics. The embedded dashboard and Prometheus HTTP listener are disabled by default, so no dashboard port is occupied. Enable them explicitly for a foreground daemon:
+
+```sh
+gortex daemon start --metrics-addr 127.0.0.1:9474
+```
+
+To control an already running daemon without restarting it:
+
+```sh
+gortex daemon dashboard start
+gortex daemon dashboard status
+gortex daemon dashboard stop
+```
+
+`start` prints the browser URL and reuses the startup address, or chooses
+`127.0.0.1:9474` when none was configured. Use `start --address 127.0.0.1:9476`
+to choose another loopback port. Repeated start/stop calls are safe; stop before
+changing the address of a running dashboard. Add `--json` for machine-readable
+state. These commands change runtime state only. Stopping the dashboard closes
+its HTTP connections and releases the port; metric collection and history continue.
+
+For persistent daemon startup, set this in `~/.gortex/config.yaml`:
+
+```yaml
+daemon:
+  metrics_addr: "127.0.0.1:9474"
+```
+
+Then open http://127.0.0.1:9474. No containers, exporter, cloud account or paid service are required. Prometheus, Grafana and Tempo remain an optional companion stack for additional queries and sampled traces.
 
 The stack never starts, configures or restarts Gortex. Use a build containing the observability changes before enabling its endpoints. Older releases do not provide these metrics.
 
@@ -10,7 +38,7 @@ Metrics are sampled every 10 seconds, whether or not a browser or Prometheus is 
 
 History is stored separately from the graph in `observability/history.sqlite` under the daemon's cache directory. It survives restart and serves no point older than 24 hours. Startup, reads, writes and the periodic collector expire old records. While the daemon is stopped no cleanup runs; startup removes expired records before serving history. Up to 8640 points and 32 MiB of compressed payload are retained, so high cardinality can shorten the available window. The SQLite file has a separate bounded page budget and rollback-journal overhead; this is not a claim that total disk usage is exactly 32 MiB. No request arguments, source text, credentials or raw error messages are recorded. Daily MCP charts aggregate operations; the Prometheus endpoint retains per-operation counters.
 
-The default listener is `127.0.0.1:9474`. `GORTEX_METRICS_ADDR` or `--metrics-addr` changes it; an explicit empty value or `off` disables HTTP while history continues. If the default port is occupied, collection continues and the daemon logs that the dashboard is unavailable. An explicitly configured invalid or occupied address fails startup. HTTP remains loopback-only with Host/Origin checks. A storage failure leaves live metrics running and is reported as unavailable history.
+Listener precedence is `--metrics-addr`, then `GORTEX_METRICS_ADDR`, then `daemon.metrics_addr`. With all three unset, HTTP stays disabled while collection and history continue. An explicit empty flag/environment value or `off` disables HTTP even when a lower-priority source enables it. An explicitly configured invalid or occupied address fails startup. HTTP remains loopback-only with Host/Origin checks. A storage failure leaves live metrics running and is reported as unavailable history.
 
 Read-only GET endpoints are `/api/v1/current` (latest sample with Unix-millisecond `at` and canonical metric `values`) and `/api/v1/history?seconds=3600&limit=360` (samples, availability and 86400-second retention). History accepts `seconds` from 1 to 86400, `limit` from 2 to 1440, and optional `scope=charts` to omit repository metadata from frequent chart refreshes. Responses and concurrent readers are bounded; errors never expose filesystem paths or SQL. `/metrics` remains the Prometheus endpoint. Expensive profiles and exported traces are still opt-in.
 

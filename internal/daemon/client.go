@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -30,20 +31,44 @@ type Client struct {
 // standalone) should treat ErrDaemonUnavailable distinctly from other
 // errors and continue as if the daemon isn't there.
 func Dial(h Handshake) (*Client, error) {
-	return DialTo(SocketPath(), h)
+	return DialContext(context.Background(), h)
+}
+
+// DialContext includes the socket connection and handshake in ctx's lifetime.
+// Once the handshake succeeds, the returned Client belongs to the caller and
+// later cancellation of ctx does not close it.
+func DialContext(ctx context.Context, h Handshake) (*Client, error) {
+	return DialToContext(ctx, SocketPath(), h)
 }
 
 // DialTo is Dial with an explicit socket path. Useful for tests and for
 // clients that want to talk to a daemon on a non-default socket.
 func DialTo(socketPath string, h Handshake) (*Client, error) {
+	return DialToContext(context.Background(), socketPath, h)
+}
+
+// DialToContext is DialContext with an explicit private/custom socket path.
+// Legacy connect and handshake timeouts still bound contexts without deadlines.
+func DialToContext(ctx context.Context, socketPath string, h Handshake) (client *Client, err error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	defer func() {
+		if err != nil && ctx.Err() != nil {
+			err = ctx.Err()
+		}
+	}()
 	d := &net.Dialer{Timeout: 500 * time.Millisecond}
-	conn, err := d.Dial("unix", socketPath)
+	conn, err := d.DialContext(ctx, "unix", socketPath)
 	if err != nil {
 		if isNoDaemonErr(err) {
 			return nil, fmt.Errorf("%w: %v", ErrDaemonUnavailable, err)
 		}
 		return nil, err
 	}
+
+	stopClose := context.AfterFunc(ctx, func() { _ = conn.Close() })
+	defer stopClose()
 
 	if h.Version == 0 {
 		h.Version = ProtocolVersion
@@ -86,6 +111,12 @@ func DialTo(socketPath string, h Handshake) (*Client, error) {
 			return nil, fmt.Errorf("%w: %s", ErrProtocolVersionMismatch, ack.ErrorMsg)
 		}
 		return nil, fmt.Errorf("daemon rejected handshake [%s]: %s", ack.ErrorCode, ack.ErrorMsg)
+	}
+	// Stop cancellation before transferring ownership. If it has already
+	// started, the connection may be closing and cannot be returned as usable.
+	if !stopClose() {
+		_ = conn.Close()
+		return nil, ctx.Err()
 	}
 	return &Client{Conn: conn, reader: reader, Ack: ack}, nil
 }
