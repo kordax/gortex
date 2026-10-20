@@ -154,6 +154,7 @@ func boundHandler[Req, Res any](
 		// Fire just inside any deadline the transport already imposed (the
 		// daemon socket's per-request lifetime), so the client receives this
 		// diagnosis rather than the transport's opaque timeout.
+		useCallerDeadline := false
 		if deadline, ok := ctx.Deadline(); ok {
 			remaining := time.Until(deadline)
 			if remaining <= 0 {
@@ -162,6 +163,11 @@ func boundHandler[Req, Res any](
 			}
 			if remaining > transportDeadlineMargin {
 				remaining -= transportDeadlineMargin
+			} else if remaining <= timeout {
+				// With no room for a margin, let the caller's timer own expiry.
+				// A second timer for the same deadline can fire first and turn
+				// inherited cancellation into a server timeout on coarse clocks.
+				useCallerDeadline = true
 			}
 			if remaining < timeout {
 				timeout = remaining
@@ -173,7 +179,13 @@ func boundHandler[Req, Res any](
 			return busy(stuck, timeout)
 		}
 
-		callCtx, cancel := context.WithTimeout(ctx, timeout)
+		var callCtx context.Context
+		var cancel context.CancelFunc
+		if useCallerDeadline {
+			callCtx, cancel = context.WithCancel(ctx)
+		} else {
+			callCtx, cancel = context.WithTimeout(ctx, timeout)
+		}
 		defer cancel()
 		// Every call carries a commit note. A read handler never writes to it
 		// and pays one context value; a mutating handler stamps its disk commit

@@ -3,9 +3,11 @@ package main
 import (
 	"bytes"
 	"io"
+	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -31,7 +33,11 @@ func TestDaemonProfileWritesPrivateSnapshotAndPreservesExistingFiles(t *testing.
 	require.True(t, bytes.HasPrefix(data, []byte{0x1f, 0x8b}))
 	info, err := os.Stat(path)
 	require.NoError(t, err)
-	assert.Zero(t, info.Mode().Perm()&0o077, "profiles may contain private process details")
+	if runtime.GOOS != "windows" {
+		assert.Zero(t, info.Mode().Perm()&0o077, "profiles may contain private process details")
+	}
+	// Windows privacy is enforced and checked by platform.CreatePrivateFile's
+	// protected owner-only DACL tests; Stat mode bits do not describe its ACL.
 	require.Error(t, run(), "an existing profile must never be silently overwritten")
 	after, err := os.ReadFile(path)
 	require.NoError(t, err)
@@ -53,4 +59,21 @@ func TestDaemonProfileRejectsExternalAddressesAndExcessiveDuration(t *testing.T)
 		cmd.SetErr(io.Discard)
 		require.Error(t, cmd.Execute(), args)
 	}
+}
+
+func TestDaemonProfileRemovesIncompleteSnapshot(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Length", "64")
+		if _, err := io.WriteString(w, "partial"); err != nil {
+			t.Errorf("write partial profile response: %v", err)
+		}
+	}))
+	defer server.Close()
+	path := filepath.Join(t.TempDir(), "incomplete.pprof")
+	cmd := newDaemonProfileCommand()
+	cmd.SetArgs([]string{"--kind", "heap", "--address", strings.TrimPrefix(server.URL, "http://"), "--out", path})
+	cmd.SetOut(io.Discard)
+	cmd.SetErr(io.Discard)
+	require.Error(t, cmd.Execute())
+	assert.NoFileExists(t, path, "a failed capture must not leave partial private data")
 }

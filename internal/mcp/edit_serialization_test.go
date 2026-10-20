@@ -66,8 +66,13 @@ type degradedMutationTestWatcher struct {
 
 func (w degradedMutationTestWatcher) DegradedReason() string { return w.reason }
 
-func mutationRefs(path string) int {
-	path = filepath.Clean(path)
+func mutationRefs(t *testing.T, path string) int {
+	t.Helper()
+	key, err := mutationPathKey(path)
+	if err != nil {
+		t.Fatalf("mutation path key for %q: %v", path, err)
+	}
+	path = key
 	mutationPathLocks.Lock()
 	defer mutationPathLocks.Unlock()
 	if entry := mutationPathLocks.byPath[path]; entry != nil {
@@ -80,12 +85,12 @@ func waitForMutationRefs(t *testing.T, path string, want int) {
 	t.Helper()
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		if mutationRefs(path) == want {
+		if mutationRefs(t, path) == want {
 			return
 		}
 		time.Sleep(time.Millisecond)
 	}
-	t.Fatalf("mutation refs for %q = %d, want %d", path, mutationRefs(path), want)
+	t.Fatalf("mutation refs for %q = %d, want %d", path, mutationRefs(t, path), want)
 }
 
 func TestAcquireMutationPathSerializesAndCleansUp(t *testing.T) {
@@ -156,7 +161,15 @@ func TestAcquireMutationPathCancellationReleasesQueueReference(t *testing.T) {
 func TestAcquireMutationPathsCancellationReleasesEarlierLocks(t *testing.T) {
 	first := filepath.Join(t.TempDir(), "a.go")
 	second := filepath.Join(t.TempDir(), "b.go")
-	if second < first {
+	firstKey, err := mutationPathKey(first)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondKey, err := mutationPathKey(second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if secondKey < firstKey {
 		first, second = second, first
 	}
 

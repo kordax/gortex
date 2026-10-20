@@ -127,7 +127,23 @@ func NewGitTreeSource(ctx context.Context, repoDir, treeOID string) (*GitTreeSou
 	if err != nil {
 		return nil, fmt.Errorf("git tree source: list %s: %w", resolved, err)
 	}
-	if len(missingOIDs) != 0 {
+	unknownSizes := false
+	for _, entry := range entries {
+		if entry.meta.Size < 0 {
+			unknownSizes = true
+			break
+		}
+	}
+	if unknownSizes && missingOIDs == nil {
+		// Newer Git versions report missing blob sizes as BAD while
+		// ls-tree still succeeds. Prove local availability before reads,
+		// just as for the older size-free listing fallback.
+		missingOIDs, err = gitTreeMissingObjects(ctx, abs, resolved, false)
+		if err != nil {
+			return nil, fmt.Errorf("git tree source: local missing-blob probe for %s: %w", resolved, err)
+		}
+	}
+	if unknownSizes || len(missingOIDs) != 0 {
 		if err := populateLocalBlobSizes(ctx, abs, order, entries, missingOIDs); err != nil {
 			return nil, fmt.Errorf("git tree source: local blob sizes for %s: %w", resolved, err)
 		}

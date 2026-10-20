@@ -324,7 +324,10 @@ func downloadVerifiedContext(ctx context.Context, client *http.Client, url, dst,
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	return os.Rename(tmp, dst)
+	// The verified temporary file is closed before atomic publication. On
+	// Windows concurrent publishers/readers can briefly refuse replacement;
+	// the shared helper retries those sharing errors without deleting dst.
+	return platform.ReplaceFile(tmp, dst)
 }
 
 func fileSHA256Matches(path, want string) (bool, error) {

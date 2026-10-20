@@ -178,16 +178,22 @@ func TestShortInheritedDeadlineStillBoundsBlockedHandler(t *testing.T) {
 		close(release)
 		assert.Eventually(t, func() bool { return AbandonedToolCalls() == 0 }, time.Second, time.Millisecond)
 	})
-	entered := make(chan struct{}, 1)
-	registerBlockingTool(srv, "test_short_deadline", release, entered)
-	tool := srv.MCPServer().GetTool("test_short_deadline")
-	require.NotNil(t, tool)
+	entered := make(chan struct{})
+	finished := make(chan struct{})
+	// No fallback sleep can complete this handler before the assertion. Only
+	// cleanup releases it; expiry must return independently of handler exit.
+	handler := srv.boundToolHandler(func(context.Context, mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+		close(entered)
+		defer close(finished)
+		<-release
+		return mcplib.NewToolResultText("finally"), nil
+	})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 	defer cancel()
 	done := make(chan error, 1)
 	go func() {
-		_, err := tool.Handler(ctx, mcplib.CallToolRequest{
+		_, err := handler(ctx, mcplib.CallToolRequest{
 			Params: mcplib.CallToolParams{Name: "test_short_deadline"},
 		})
 		done <- err
@@ -202,6 +208,11 @@ func TestShortInheritedDeadlineStillBoundsBlockedHandler(t *testing.T) {
 		require.ErrorIs(t, err, context.DeadlineExceeded)
 	case <-time.After(2 * time.Second):
 		t.Fatal("short inherited deadline must release the caller while the handler remains blocked")
+	}
+	select {
+	case <-finished:
+		t.Fatal("deadline assertion ran after the handler had already exited")
+	default:
 	}
 	assert.EqualValues(t, 1, AbandonedToolCalls())
 }

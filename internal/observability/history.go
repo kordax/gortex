@@ -88,13 +88,7 @@ func openHistory(path string, now func() time.Time) (_ *History, err error) {
 		_ = file.Close()
 		return nil, errors.New("metric history: database entry changed during open")
 	}
-	dsn := url.URL{Scheme: "file", Path: filepath.ToSlash(path)}
-	query := dsn.Query()
-	for _, pragma := range []string{"busy_timeout(2000)", "secure_delete(ON)", "temp_store(MEMORY)"} {
-		query.Add("_pragma", pragma)
-	}
-	dsn.RawQuery = query.Encode()
-	db, err := sql.Open("sqlite", dsn.String())
+	db, err := sql.Open("sqlite", historyDSN(path))
 	if err != nil {
 		return nil, err
 	}
@@ -156,6 +150,22 @@ func openHistory(path string, now func() time.Time) (_ *History, err error) {
 		return nil, err
 	}
 	return h, nil
+}
+
+func historyDSN(path string) string {
+	slashed := filepath.ToSlash(path)
+	// Drive-letter paths must be URI paths, not authorities: /C:/... renders
+	// file:///C:/... while C:/... renders file://C:/... and SQLite rejects it.
+	if !strings.HasPrefix(slashed, "/") {
+		slashed = "/" + slashed
+	}
+	dsn := url.URL{Scheme: "file", Path: slashed}
+	query := dsn.Query()
+	for _, pragma := range []string{"busy_timeout(2000)", "secure_delete(ON)", "temp_store(MEMORY)"} {
+		query.Add("_pragma", pragma)
+	}
+	dsn.RawQuery = query.Encode()
+	return dsn.String()
 }
 
 func historyDirectory(dir string) (string, error) {

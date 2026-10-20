@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/zzet/gortex/internal/platform"
 )
 
 func init() {
@@ -73,7 +74,7 @@ func newDaemonProfileCommand() *cobra.Command {
 				}
 				output = "gortex-" + kind + "-" + time.Now().UTC().Format("20060102T150405Z") + extension
 			}
-			file, err := os.OpenFile(filepath.Clean(output), os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+			file, err := platform.CreatePrivateFile(filepath.Clean(output))
 			if err != nil {
 				return fmt.Errorf("create profile (existing files are preserved): %w", err)
 			}
@@ -95,7 +96,7 @@ func newDaemonProfileCommand() *cobra.Command {
 				return err
 			}
 			complete = true
-			fmt.Fprintf(cmd.OutOrStdout(), "Saved %s (%d bytes, mode 0600)\n", output, written)
+			fmt.Fprintf(cmd.OutOrStdout(), "Saved %s (%d bytes, owner-only access)\n", output, written)
 			if kind == "trace" {
 				fmt.Fprintf(cmd.OutOrStdout(), "Inspect: go tool trace %s\n", strconv.Quote(output))
 			} else {
@@ -111,6 +112,6 @@ func newDaemonProfileCommand() *cobra.Command {
 	cmd.Flags().StringVar(&address, "address", addressDefault, "daemon loopback diagnostics address")
 	cmd.Flags().StringVar(&kind, "kind", "cpu", "cpu|heap|allocs|goroutine|threadcreate|trace|block|mutex")
 	cmd.Flags().DurationVar(&duration, "duration", 10*time.Second, "capture duration (whole seconds; not used for snapshots)")
-	cmd.Flags().StringVar(&output, "out", "", "new output file, written with mode 0600")
+	cmd.Flags().StringVar(&output, "out", "", "new output file with owner-only access")
 	return cmd
 }

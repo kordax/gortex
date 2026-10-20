@@ -13,13 +13,14 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/zzet/gortex/internal/daemon"
+	"github.com/zzet/gortex/internal/testenv"
 )
 
 func TestMonitorCancellationClosesInflightControlConnection(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("Unix socket control transport")
 	}
-	socket := filepath.Join(t.TempDir(), "monitor.sock")
+	socket := filepath.Join(testenv.ShortTempDir(t), "monitor.sock")
 	t.Setenv("GORTEX_DAEMON_SOCKET", socket)
 	listener, err := net.Listen("unix", socket)
 	require.NoError(t, err)

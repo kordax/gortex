@@ -14,6 +14,7 @@ import (
 
 	"github.com/zzet/gortex/internal/graph/store_sqlite"
 	"github.com/zzet/gortex/internal/indexer"
+	"github.com/zzet/gortex/internal/pathkey"
 )
 
 func TestCheckoutBatchDeletionCoordinatorEndToEnd(t *testing.T) {
@@ -104,7 +105,7 @@ func TestCheckoutBatchDeletionCoordinatorEndToEnd(t *testing.T) {
 }
 
 func TestCheckoutBatchReceiptCannotBeRecoveredFromAnotherView(t *testing.T) {
-	root := t.TempDir()
+	root := pathkey.CanonicalExistingRoot(t.TempDir())
 	ctx := withCheckoutMutation(context.Background(), &fakeCheckoutMutationLifecycle{}, root)
 	scope := checkoutMutationFromContext(ctx)
 	scope.checkoutID, scope.incarnation = "selected", "incarnation"
@@ -163,7 +164,7 @@ func TestCheckoutBatchEditsAndMovesUseCoordinator(t *testing.T) {
 
 func TestCheckoutBatchWrongViewLookupDoesNotPoisonRecovery(t *testing.T) {
 	s := newAtomicBatchTestServer(t, mutationTestWatcher{})
-	root := t.TempDir()
+	root := pathkey.CanonicalExistingRoot(t.TempDir())
 	path := filepath.Join(root, "deleted.sql")
 	lease := &fakeCheckoutMutationLifecycle{}
 	ctx := withCheckoutMutation(context.Background(), lease, root)
@@ -188,7 +189,7 @@ func TestCheckoutBatchWrongViewLookupDoesNotPoisonRecovery(t *testing.T) {
 
 func TestCheckoutBatchRestartDoesNotReuseDaemonLocalReceipt(t *testing.T) {
 	s := newAtomicBatchTestServer(t, mutationTestWatcher{})
-	root := t.TempDir()
+	root := pathkey.CanonicalExistingRoot(t.TempDir())
 	refreshed := false
 	lease := &fakeCheckoutMutationLifecycle{refresh: func(context.Context) (indexer.CheckoutCycle, error) {
 		refreshed = true
@@ -212,7 +213,7 @@ func TestCheckoutBatchRestartDoesNotReuseDaemonLocalReceipt(t *testing.T) {
 }
 
 func TestCheckoutBatchAfterImageAcceptsUnchangedBytes(t *testing.T) {
-	root := t.TempDir()
+	root := pathkey.CanonicalExistingRoot(t.TempDir())
 	path := writeAtomicBatchFixture(t, root, "source.go", "package fixture\n")
 	file := batchTransactionFile{Path: path, BeforeSHA256: testSHA256("package fixture\n"), AfterSHA256: testSHA256("package fixture\n")}
 	require.NoError(t, verifyBatchAfterImages([]batchTransactionFile{file}))
@@ -227,7 +228,7 @@ func TestCheckoutBatchAfterImageAcceptsUnchangedBytes(t *testing.T) {
 func TestCheckoutBatchRetryRecoversFreshnessBarrier(t *testing.T) {
 	s := newAtomicBatchTestServer(t, mutationTestWatcher{})
 	mutation, done, path := newReceiptCheckoutMutation(t)
-	root := filepath.Dir(path)
+	root := pathkey.CanonicalExistingRoot(filepath.Dir(path))
 	mutation.ticket.Ticket.Path = root
 	ctx := withCheckoutMutation(context.Background(), mutation, root)
 	receipt := batchTransactionReceipt{
