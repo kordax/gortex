@@ -229,6 +229,7 @@ func TestCheckoutBatchRetryRecoversFreshnessBarrier(t *testing.T) {
 	s := newAtomicBatchTestServer(t, mutationTestWatcher{})
 	mutation, done, path := newReceiptCheckoutMutation(t)
 	root := pathkey.CanonicalExistingRoot(filepath.Dir(path))
+	mutation.ticket.Root = root
 	mutation.ticket.Ticket.Path = root
 	ctx := withCheckoutMutation(context.Background(), mutation, root)
 	receipt := batchTransactionReceipt{
@@ -240,6 +241,7 @@ func TestCheckoutBatchRetryRecoversFreshnessBarrier(t *testing.T) {
 	state := &batchTransactionState{receipt: receipt, done: make(chan struct{})}
 	s.refreshCheckoutBatchGraph(ctx, state, receipt)
 	firstID := state.snapshot().Files[0].ReindexReceipt
+	require.NotEmpty(t, firstID, "refresh admission failed: %+v", state.snapshot())
 	failure := errors.New("first publication failed")
 	done <- indexer.MutationResult{RequestedGeneration: 7, Err: failure}
 	waitCheckoutReceipt(t, s, firstID)

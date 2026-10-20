@@ -18,12 +18,25 @@ func TestCreatePrivateFileRefusesExistingEntries(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, file.Close())
 	assertPrivateFilePermissions(t, path)
-	_, err = CreatePrivateFile(path)
+	unexpected, err := CreatePrivateFile(path)
+	if unexpected != nil {
+		assert.NoError(t, unexpected.Close(), "close an unexpected existing-file handle before asserting refusal")
+	}
+	assert.Nil(t, unexpected)
 	require.Error(t, err)
 	assert.True(t, os.IsExist(err), "existing files must be refused: %v", err)
 	body, err := os.ReadFile(path)
 	require.NoError(t, err)
 	assert.Equal(t, "private snapshot", string(body))
+
+	directory := t.TempDir()
+	unexpected, err = CreatePrivateFile(directory)
+	if unexpected != nil {
+		assert.NoError(t, unexpected.Close(), "close an unexpected directory handle before asserting refusal")
+	}
+	assert.Nil(t, unexpected)
+	require.Error(t, err, "an existing directory must not be replaced")
+	assert.DirExists(t, directory)
 
 	for _, dangling := range []bool{false, true} {
 		name := "existing target"
@@ -43,7 +56,11 @@ func TestCreatePrivateFileRefusesExistingEntries(t *testing.T) {
 				}
 				require.NoError(t, err)
 			}
-			_, err := CreatePrivateFile(link)
+			unexpected, err := CreatePrivateFile(link)
+			if unexpected != nil {
+				assert.NoError(t, unexpected.Close(), "close an unexpected target handle before asserting refusal")
+			}
+			assert.Nil(t, unexpected)
 			require.Error(t, err, "existing symlinks must not be followed or replaced")
 			got, err := os.Readlink(link)
 			require.NoError(t, err)

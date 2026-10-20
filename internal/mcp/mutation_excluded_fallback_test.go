@@ -23,6 +23,7 @@ import (
 	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/indexer"
 	"github.com/zzet/gortex/internal/parser"
+	"github.com/zzet/gortex/internal/pathkey"
 	"github.com/zzet/gortex/internal/query"
 )
 
@@ -49,7 +50,7 @@ func (e *fallbackBlockingExtractor) Extract(path string, _ []byte) (*parser.Extr
 
 func excludedFallbackFixture(t *testing.T) (*Server, string, func()) {
 	t.Helper()
-	root := t.TempDir()
+	root := pathkey.CanonicalExistingRoot(t.TempDir())
 	cmd := exec.Command("git", "init", "-q", root)
 	for _, entry := range os.Environ() {
 		key, _, _ := strings.Cut(entry, "=")

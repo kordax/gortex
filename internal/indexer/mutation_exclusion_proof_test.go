@@ -147,6 +147,12 @@ func TestMultiWatcherExclusionProofReleasesStateBeforeGraphRead(t *testing.T) {
 	defer func() { assert.NoError(t, mw.Stop()) }()
 	w := mw.watchers["repo-a"]
 	idx := w.currentMutationIndexer()
+	// This proof intentionally rejects aliases. Temp paths can contain symlink
+	// parents or Windows short names, so use the canonical root for this fixture.
+	var err error
+	root, err = filepath.EvalSymlinks(root)
+	require.NoError(t, err)
+	idx.rootPath = root
 	idx.SetExcludePatterns([]string{"**/*_test.go"})
 	w.excludes = excludes.New([]string{"**/*_test.go"})
 	path := filepath.Join(root, "new_test.go")
@@ -156,22 +162,44 @@ func TestMultiWatcherExclusionProofReleasesStateBeforeGraphRead(t *testing.T) {
 	assert.False(t, skip, "unstarted watcher cannot prove admission policy")
 	// Model only the route's started state, without launching filesystem work.
 	mw.started["repo-a"] = true
-	defer func() { mw.started["repo-a"] = false }()
+	defer func() {
+		mw.mu.Lock()
+		mw.started["repo-a"] = false
+		mw.mu.Unlock()
+	}()
+	require.Equal(t, "repo-a", mw.multi.RepoForFile(path), "canonical fixture must route to its owning watcher")
+	skip, err = mw.CanSkipFileMutation(t.Context(), path)
+	require.NoError(t, err)
+	require.True(t, skip, "canonical excluded fixture must reach the graph proof")
 	blocked := blockedExclusionStore{Store: idx.graph, entered: make(chan struct{}), release: make(chan struct{})}
 	idx.graph = blocked
 	var once sync.Once
 	release := func() { once.Do(func() { close(blocked.release) }) }
 	defer release()
+	ctx, cancel := context.WithCancel(t.Context())
 	done := make(chan error, 1)
+	finished := make(chan struct{})
 	go func() {
-		skip, err := mw.CanSkipFileMutation(t.Context(), path)
+		defer close(finished)
+		skip, err := mw.CanSkipFileMutation(ctx, path)
 		if err == nil && !skip {
 			err = errors.New("expected proven exclusion after releasing lookup")
 		}
 		done <- err
 	}()
+	defer func() {
+		cancel()
+		release()
+		select {
+		case <-finished:
+		case <-time.After(5 * time.Second):
+			t.Error("proof worker did not stop during cleanup")
+		}
+	}()
 	select {
 	case <-blocked.entered:
+	case err := <-done:
+		t.Fatalf("proof returned before graph lookup: %v (root=%q, path=%q)", err, root, path)
 	case <-time.After(5 * time.Second):
 		t.Fatal("proof did not reach graph lookup")
 	}

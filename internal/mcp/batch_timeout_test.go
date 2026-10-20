@@ -54,7 +54,8 @@ func TestAtomicBatchTimeoutPreservesCommittedReceipt(t *testing.T) {
 			done := make(chan indexer.MutationResult, 2)
 			g := graph.New()
 			s := NewServer(query.NewEngine(g), g, nil, nil, zap.NewNop(), nil)
-			s.watcher = mutationTestWatcher{done: done, generation: 7}
+			watcher := &batchPollBarrierWatcher{mutationTestWatcher: mutationTestWatcher{done: done, generation: 7}, entered: make(chan struct{}), release: make(chan struct{})}
+			s.watcher = watcher
 			s.ToolCallTimeout = time.Second
 			s.mutationReindexWait = 5 * time.Second
 			dir := t.TempDir()
@@ -66,29 +67,61 @@ func TestAtomicBatchTimeoutPreservesCommittedReceipt(t *testing.T) {
 			}
 			req := mcplib.CallToolRequest{}
 			req.Params.Name = "batch_edit"
-			req.Params.Arguments = map[string]any{"edits": changes}
+			const id = "committed-before-timeout"
+			req.Params.Arguments = map[string]any{"transaction_id": id, "edits": changes}
 			handler := s.boundToolHandler(s.handleAtomicBatchEdit)
 			if facade {
 				tool := s.mcpServer.GetTool("edit")
 				require.NotNil(t, tool)
 				handler = tool.Handler
 				req.Params.Name = "edit"
-				req.Params.Arguments = map[string]any{"operation": "batch", "changes": changes}
+				req.Params.Arguments = map[string]any{"operation": "batch", "changes": changes, "options": map[string]any{"transaction_id": id}}
 			}
+			// Bootstrap the real transaction without a tool deadline. The retry's
+			// real timeout starts only after durable commit and refresh admission;
+			// filesystem speed must not choose which state this test exercises.
+			owner := make(chan fallbackWriteResult, 1)
+			ownerReq := makeReq("batch_edit", map[string]any{"transaction_id": id, "edits": changes})
 			var state *batchTransactionState
-			defer func() {
+			t.Cleanup(func() {
+				close(watcher.release)
 				for range 2 {
 					done <- indexer.MutationResult{RequestedGeneration: 7, AppliedGeneration: 7, Reindexed: true}
 				}
 				close(done)
+				select {
+				case outcome := <-owner:
+					assert.NoError(t, outcome.err)
+					if assert.NotNil(t, outcome.result) {
+						assert.False(t, outcome.result.IsError, viewResultText(t, outcome.result))
+					}
+				case <-time.After(5 * time.Second):
+					t.Error("committed owner did not finish after release")
+				}
 				if state != nil {
 					waitBatchTimeoutTerminal(t, state)
 				}
+			})
+			go func() {
+				result, err := s.handleAtomicBatchEdit(t.Context(), ownerReq)
+				owner <- fallbackWriteResult{result: result, err: err}
 			}()
-			result, err := handler(context.Background(), req)
+			select {
+			case <-watcher.entered:
+			case outcome := <-owner:
+				owner <- outcome
+				t.Fatalf("transaction returned before refresh admission: result=%+v err=%v", outcome.result, outcome.err)
+			case <-time.After(5 * time.Second):
+				t.Fatal("transaction did not enter refresh admission")
+			}
+			value, found := s.batchTransactions.Load(id)
+			require.True(t, found)
+			state = value.(*batchTransactionState)
+			require.Equal(t, "committed", state.snapshot().DiskStatus)
+			require.Equal(t, "pending", state.snapshot().GraphStatus)
+			result, err := handler(t.Context(), req)
 			require.NoError(t, err)
-			s.batchTransactions.Range(func(_, value any) bool { state = value.(*batchTransactionState); return false })
-			require.NotNil(t, state)
+			assert.Equal(t, int64(1), watcher.attempts.Load(), "retry must not replay the committed write")
 			verdict := batchTimeoutVerdict(t, result)
 			assert.Equal(t, mutationDiskCommitted, verdict.Status)
 			batch := verdict.Batches[0]

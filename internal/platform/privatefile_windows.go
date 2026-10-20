@@ -13,8 +13,9 @@ import (
 // CreatePrivateFile atomically creates an owner-only file. Windows ignores the
 // POSIX permission bits passed to os.OpenFile, so a protected DACL is supplied
 // at creation; inherited directory permissions never expose profile contents.
-// CREATE_NEW also refuses existing files and reparse points without touching
-// their contents. The caller owns the returned handle.
+// CREATE_NEW and OPEN_REPARSE_POINT refuse existing leaf entries atomically,
+// including dangling symlinks, instead of creating their missing targets.
+// The caller owns the returned handle.
 func CreatePrivateFile(path string) (*os.File, error) {
 	user, err := windows.GetCurrentProcessToken().GetTokenUser()
 	if err != nil {
@@ -33,7 +34,7 @@ func CreatePrivateFile(path string) (*os.File, error) {
 		Length: uint32(unsafe.Sizeof(windows.SecurityAttributes{})), SecurityDescriptor: descriptor,
 	}
 	handle, err := windows.CreateFile(name, windows.GENERIC_WRITE, windows.FILE_SHARE_READ,
-		&attributes, windows.CREATE_NEW, windows.FILE_ATTRIBUTE_NORMAL, 0)
+		&attributes, windows.CREATE_NEW, windows.FILE_ATTRIBUTE_NORMAL|windows.FILE_FLAG_OPEN_REPARSE_POINT, 0)
 	if err != nil {
 		return nil, &os.PathError{Op: "open", Path: path, Err: err}
 	}

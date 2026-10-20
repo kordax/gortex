@@ -48,7 +48,6 @@ func TestBatchStatusOnlyDoesNotJoinBlockedRefresh(t *testing.T) {
 			s := NewServer(query.NewEngine(g), g, nil, nil, zap.NewNop(), nil)
 			watcher := &batchPollBarrierWatcher{entered: make(chan struct{}), release: make(chan struct{})}
 			s.watcher = watcher
-			s.ToolCallTimeout = 200 * time.Millisecond
 			path := writeAtomicBatchFixture(t, t.TempDir(), "blocked.txt", "before\n")
 			const id = "poll-behind-refresh"
 			handler := s.boundToolHandler(s.handleAtomicBatchEdit)
@@ -79,23 +78,36 @@ func TestBatchStatusOnlyDoesNotJoinBlockedRefresh(t *testing.T) {
 			var releaseOnce sync.Once
 			unblock := func() { releaseOnce.Do(func() { close(watcher.release) }) }
 			var state *batchTransactionState
+			originalDone := make(chan struct{})
 			t.Cleanup(func() {
 				unblock()
+				select {
+				case <-originalDone:
+				case <-time.After(5 * time.Second):
+					t.Error("original waiter did not stop after cleanup release")
+				}
+				if state == nil {
+					if value, found := s.batchTransactions.Load(id); found {
+						state = value.(*batchTransactionState)
+					}
+				}
 				if state != nil {
 					waitBatchTimeoutTerminal(t, state)
 				}
 			})
 			ctx, cancel := context.WithCancel(t.Context())
 			defer cancel()
-			original := make(chan *mcplib.CallToolResult, 1)
+			original := make(chan fallbackWriteResult, 1)
 			go func() {
 				result, err := call(ctx, nil, []any{map[string]any{"op": "edit_file", "path": path, "old_string": "before", "new_string": "after"}})
-				assert.ErrorIs(t, err, context.Canceled)
-				original <- result
+				original <- fallbackWriteResult{result: result, err: err}
+				close(originalDone)
 			}()
 			select {
 			case <-watcher.entered:
-			case <-time.After(time.Second):
+			case outcome := <-original:
+				t.Fatalf("mutation returned before graph refresh: result=%+v err=%v", outcome.result, outcome.err)
+			case <-time.After(5 * time.Second):
 				t.Fatal("mutation never entered graph refresh")
 			}
 			value, exists := s.batchTransactions.Load(id)
@@ -104,15 +116,18 @@ func TestBatchStatusOnlyDoesNotJoinBlockedRefresh(t *testing.T) {
 			require.Equal(t, "committed", state.snapshot().DiskStatus)
 			cancel()
 			select {
-			case <-original:
+			case outcome := <-original:
 				// The original waiter cancels independently of its committed owner.
+				assert.ErrorIs(t, outcome.err, context.Canceled)
 			case <-time.After(time.Second):
 				t.Fatal("original waiter did not cancel")
 			}
 			cancelled, cancelPoll := context.WithCancel(t.Context())
 			cancelPoll()
 			_, _ = call(cancelled, map[string]any{"status_only": true}, nil)
-			result, err := call(t.Context(), map[string]any{"status_only": true}, nil)
+			pollCtx, stopPoll := context.WithTimeout(t.Context(), 200*time.Millisecond)
+			defer stopPoll()
+			result, err := call(pollCtx, map[string]any{"status_only": true}, nil)
 			require.NoError(t, err)
 			require.False(t, result.IsError, "poll waited behind the refresh owner: %s", viewResultText(t, result))
 			payload := decodeFileOpsResult(t, result)
