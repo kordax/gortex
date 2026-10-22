@@ -82,7 +82,7 @@ Missing data stays missing. It is not converted to zero. Repository counts are c
 
 ## Configure the native daemon endpoint
 
-Metrics collection and the local dashboard are enabled by default and listen separately from profiling. No service override is needed for the default address. To choose an address explicitly for an existing systemd user service:
+Metrics collection continues by default; the dashboard HTTP listener is opt-in and separate from profiling. To enable an address persistently for an existing systemd user service:
 
 ```sh
 systemctl --user edit com.zzet.gortex.service
@@ -126,12 +126,19 @@ Tempo retains trace blocks for 24 hours. Retention is periodic cleanup, not an e
 
 ## Profiles
 
-Profiling has a separate optional endpoint. Add `Environment=GORTEX_DIAGNOSTICS_ADDR=127.0.0.1:9475` to the same service override and apply it manually. A bounded CPU capture then uses:
+Profiling has a separate optional endpoint, closed by default. Enable it on the running daemon without restarting or reindexing:
 
 ```sh
+gortex daemon profile start
+gortex daemon profile status
 gortex daemon profile --kind cpu --duration 10s --out cpu.pprof
+gortex daemon profile stop
 go tool pprof cpu.pprof
 ```
+
+`start` opens the configured startup address, or `127.0.0.1:9475`. Use `start --address 127.0.0.1:0` to choose a free port; the command prints the actual address and capture command. Start/stop/status accept `--json`. These commands change runtime state only. `stop` cancels active captures, waits for sampling cleanup and releases the port. An interrupted capture is not saved as a complete profile. If a snapshot is still finishing after the bounded cleanup wait, stop reports it and start refuses to overlap it; check status again.
+
+Opening the listener does not start CPU, block, mutex or trace capture. Timed captures stop sampling automatically even when you leave the listener open. The Go runtime's ordinary heap statistics remain enabled. For startup access, `--diagnostics-addr` or `GORTEX_DIAGNOSTICS_ADDR` remains available. A previously installed daemon must be updated and restarted once to gain these control commands.
 
 The compatibility variable `GORTEX_DAEMON_PPROF_ADDR` also enables this managed listener when the new address is unset. It does not start a second profile server. The old argv endpoint is not exposed. CPU captures are limited to 60 seconds; runtime trace, block and mutex captures to 30 seconds. Every artifact is limited to 32 MiB. Expensive captures are mutually exclusive; one bounded goroutine snapshot remains available during a CPU capture, including text dumps with `?debug=2`. Disconnecting cancels a running timed capture. Block/mutex profiles are cumulative; their sampling is enabled only during the requested interval. Files saved by `daemon profile` use mode 0600 and existing files are preserved.
 

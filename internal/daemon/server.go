@@ -715,6 +715,25 @@ func (s *Server) handleControlBounded(sess *Session, req ControlRequest) Control
 
 func (s *Server) handleControl(ctx context.Context, _ *Session, req ControlRequest) ControlResponse {
 	switch req.Kind {
+	case ControlProfiler:
+		controller, ok := s.Controller.(ProfilerController)
+		if !ok {
+			return controlErr(ErrInternal, "profiler control is unavailable; update and restart the daemon")
+		}
+		var params ProfilerParams
+		if err := unmarshalParams(req.Params, &params); err != nil {
+			return controlErr(ErrInternal, err.Error())
+		}
+		status, err := controller.Profiler(ctx, params)
+		if err != nil {
+			return controlErr(ErrInternal, err.Error())
+		}
+		result, err := json.Marshal(status)
+		if err != nil {
+			return controlErr(ErrInternal, err.Error())
+		}
+		return ControlResponse{OK: true, Result: result}
+
 	case ControlDashboard:
 		controller, ok := s.Controller.(DashboardController)
 		if !ok {

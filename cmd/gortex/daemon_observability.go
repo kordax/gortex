@@ -2,8 +2,6 @@ package main
 
 import (
 	"context"
-	"fmt"
-	"net"
 	"net/http"
 	"os"
 	"sync"
@@ -47,10 +45,9 @@ func setupDaemonTracing(logger *zap.Logger) (func(), error) {
 
 func startDaemonObservability(cmd *cobra.Command, srv *daemon.Server, controller *realController, logger *zap.Logger) (func(), error) {
 	ctx, cancel := context.WithCancel(context.Background())
-	var servers []*http.Server
-	var listeners []net.Listener
 	var history *daemonMetricHistory
 	var dashboard *daemonDashboard
+	var profiler *daemonProfiler
 	var once sync.Once
 	stop := func() {
 		once.Do(func() {
@@ -58,16 +55,8 @@ func startDaemonObservability(cmd *cobra.Command, srv *daemon.Server, controller
 			if dashboard != nil {
 				dashboard.close()
 			}
-			pprofAddr.Store("")
-			shutdownCtx, done := context.WithTimeout(context.Background(), 2*time.Second)
-			defer done()
-			for i, server := range servers {
-				if err := server.Shutdown(shutdownCtx); err != nil {
-					_ = server.Close()
-				}
-				// Shutdown cannot see a listener until Serve registers it.
-				// Release the original even when startup is immediately stopped.
-				_ = listeners[i].Close()
+			if profiler != nil {
+				profiler.close()
 			}
 			if history != nil {
 				history.close()
@@ -79,36 +68,6 @@ func startDaemonObservability(cmd *cobra.Command, srv *daemon.Server, controller
 			return value
 		}
 		return os.Getenv(env)
-	}
-	start := func(kind, addr string, handler http.Handler) error {
-		if addr == "" {
-			return nil
-		}
-		listener, err := diagnostics.ListenLocal(addr)
-		if err != nil {
-			return fmt.Errorf("%s listener: %w", kind, err)
-		}
-		server := &http.Server{
-			Handler:           handler,
-			ReadHeaderTimeout: 5 * time.Second,
-			ReadTimeout:       5 * time.Second,
-			IdleTimeout:       30 * time.Second,
-			WriteTimeout:      70 * time.Second,
-			MaxHeaderBytes:    16 << 10,
-			BaseContext:       func(_ net.Listener) context.Context { return ctx },
-		}
-		servers = append(servers, server)
-		listeners = append(listeners, listener)
-		if kind == "profiles" {
-			pprofAddr.Store(listener.Addr().String())
-		}
-		go func() {
-			if err := server.Serve(listener); err != nil && err != http.ErrServerClosed {
-				logger.Warn("daemon: observability listener stopped", zap.String("kind", kind))
-			}
-		}()
-		logger.Info("daemon: local observability listener", zap.String("kind", kind), zap.String("address", listener.Addr().String()))
-		return nil
 	}
 	metricSource := daemonMetricsHandler(ctx, srv, controller)
 	history = startDaemonMetricHistory(ctx, metricSource, logger)
@@ -152,9 +111,15 @@ func startDaemonObservability(cmd *cobra.Command, srv *daemon.Server, controller
 			profileAddress = ""
 		}
 	}
-	if err := start("profiles", profileAddress, diagnostics.ProfileHandler()); err != nil {
-		stop()
-		return nil, err
+	profiler = &daemonProfiler{ctx: ctx, logger: logger, preferred: profileAddress}
+	if controller != nil {
+		controller.profiler = profiler
+	}
+	if profileAddress != "" {
+		if _, err := profiler.apply(ctx, daemon.ProfilerParams{Action: "start", Address: profileAddress}); err != nil {
+			stop()
+			return nil, err
+		}
 	}
 	return stop, nil
 }

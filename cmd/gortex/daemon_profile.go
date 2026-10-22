@@ -25,7 +25,7 @@ func newDaemonProfileCommand() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "profile",
 		Short: "Save a bounded profile from the daemon's local diagnostics listener",
-		Long:  "Save a private Go profile without stopping the daemon. Requires daemon start --diagnostics-addr or GORTEX_DIAGNOSTICS_ADDR. CPU captures are limited to 60s; trace, block and mutex captures to 30s. Block/mutex results are cumulative process profiles, with sampling enabled only during the capture.",
+		Long:  "Save a private Go profile without stopping the daemon. Enable access on the running daemon with 'gortex daemon profile start'; disable it with 'gortex daemon profile stop' (also cancels active captures). Startup --diagnostics-addr / GORTEX_DIAGNOSTICS_ADDR remains supported. CPU captures are limited to 60s; trace, block and mutex captures to 30s. Block/mutex results are cumulative process profiles, with sampling enabled only during the capture.",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			allowed := map[string]bool{"cpu": true, "heap": true, "allocs": true, "goroutine": true, "threadcreate": true, "trace": true, "block": true, "mutex": true}
@@ -61,7 +61,7 @@ func newDaemonProfileCommand() *cobra.Command {
 			fmt.Fprintf(cmd.ErrOrStderr(), "Capturing %s from %s...\n", kind, address)
 			response, err := client.Do(req)
 			if err != nil {
-				return fmt.Errorf("profile request failed; enable the daemon diagnostics listener: %w", err)
+				return fmt.Errorf("profile request failed; enable it with 'gortex daemon profile start': %w", err)
 			}
 			defer func() { _ = response.Body.Close() }()
 			if response.StatusCode != http.StatusOK {
@@ -113,5 +113,6 @@ func newDaemonProfileCommand() *cobra.Command {
 	cmd.Flags().StringVar(&kind, "kind", "cpu", "cpu|heap|allocs|goroutine|threadcreate|trace|block|mutex")
 	cmd.Flags().DurationVar(&duration, "duration", 10*time.Second, "capture duration (whole seconds; not used for snapshots)")
 	cmd.Flags().StringVar(&output, "out", "", "new output file with owner-only access")
+	addDaemonProfileControls(cmd, callDaemonProfiler)
 	return cmd
 }

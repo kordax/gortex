@@ -58,6 +58,7 @@ type realController struct {
 	configManager *config.ConfigManager
 	// dashboard is assigned before the control socket starts serving.
 	dashboard *daemonDashboard
+	profiler  *daemonProfiler
 	// lifecycle owns every checkout lifecycle side effect. It is the same
 	// instance the MCP tools drive, so a track over the control socket and a
 	// track over MCP leave identical state behind. Nil only in tests that
