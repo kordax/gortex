@@ -2,6 +2,7 @@
 set -euo pipefail
 
 # Run from the repository root. No installed binary or default daemon is used.
+export GORTEX_AGENT_PROJECT_ROOT="$(pwd -P)"
 artifact_dir="${GORTEX_AGENT_ARTIFACT_DIR:-$(mktemp -d /tmp/gortex-agent-transport.XXXXXX)}"
 mkdir -p "$artifact_dir"
 artifact_dir="$(cd "$artifact_dir" && pwd -P)"

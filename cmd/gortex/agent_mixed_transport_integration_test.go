@@ -206,6 +206,53 @@ func agentMixedRead(ctx context.Context, client *agentWireClient, path, expected
 	return nil
 }
 
+func agentProjectSearch(ctx context.Context, client *agentWireClient, symbol, projectRoot, primary string) error {
+	raw, err := client.tool(ctx, "search", agentSearchArgs(symbol, primary, primary))
+	if err != nil {
+		return err
+	}
+	var value any
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return err
+	}
+	found, fallback := issue767JSONEvidence(value, symbol)
+	if !found || fallback || !agentProjectSearchSource(value, symbol, projectRoot) {
+		return fmt.Errorf("project symbol %q missing from copied subdirectory or search refused: %s", symbol, raw)
+	}
+	return nil
+}
+
+func agentProjectSearchSource(value any, symbol, projectRoot string) bool {
+	switch value := value.(type) {
+	case map[string]any:
+		if value["name"] == symbol && value["repo_prefix"] == "issue767" {
+			if path, ok := value["absolute_file_path"].(string); ok {
+				rel, err := filepath.Rel(projectRoot, path)
+				if err == nil && filepath.IsLocal(rel) && rel != "." {
+					return true
+				}
+			}
+		}
+		for _, child := range value {
+			if agentProjectSearchSource(child, symbol, projectRoot) {
+				return true
+			}
+		}
+	case []any:
+		for _, child := range value {
+			if agentProjectSearchSource(child, symbol, projectRoot) {
+				return true
+			}
+		}
+	case string:
+		var child any
+		if json.Unmarshal([]byte(value), &child) == nil {
+			return agentProjectSearchSource(child, symbol, projectRoot)
+		}
+	}
+	return false
+}
+
 func agentMixedSummarize(samples []agentMixedSample) map[string]agentMixedStats {
 	groups := make(map[string][]float64)
 	result := make(map[string]agentMixedStats)
@@ -279,6 +326,20 @@ func TestAgentMixedTransportIntegration(t *testing.T) {
 	}
 	f := newIssue767Fixture(t, binary)
 	f.env = append(f.env, "GORTEX_QUERY_LOG="+filepath.Join(f.root, "queries.jsonl"), "GORTEX_DAEMON_SOCKET="+filepath.Join(f.root, "daemon.sock"), "OTEL_TRACES_EXPORTER=none")
+	projectSubdir := os.Getenv("GORTEX_AGENT_PROJECT_SUBDIR")
+	projectSymbol := os.Getenv("GORTEX_AGENT_PROJECT_SYMBOL")
+	var projectSamples []agentProjectSample
+	var projectFiles int
+	if projectSubdir != "" {
+		projectRoot := os.Getenv("GORTEX_AGENT_PROJECT_ROOT")
+		if projectRoot == "" {
+			projectRoot = filepath.Join("..", "..")
+		}
+		projectSamples, projectFiles, err = agentCopyProjectSubdir(projectRoot, projectSubdir, f.primary)
+		require.NoError(t, err)
+	} else {
+		require.Empty(t, projectSymbol, "GORTEX_AGENT_PROJECT_SYMBOL requires GORTEX_AGENT_PROJECT_SUBDIR")
+	}
 	for file := range files {
 		f.write(agentMixedPath(f.primary, file), agentMixedSource(file, declarations))
 	}
@@ -322,6 +383,13 @@ func TestAgentMixedTransportIntegration(t *testing.T) {
 		f.awaitSymbol(f.primary, "Issue767PrimaryMarker")
 		client, closeClient := f.agentClient(f.primary)
 		defer closeClient()
+		if projectSymbol != "" {
+			f.await("project symbol "+projectSymbol, 2*time.Minute, func() bool {
+				ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+				defer cancel()
+				return agentProjectSearch(ctx, client, projectSymbol, filepath.Join(f.primary, "project", projectSubdir), f.primary) == nil
+			})
+		}
 		f.await("last generated symbol indexed and file readable", 2*time.Minute, func() bool {
 			ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 			defer cancel()
@@ -396,6 +464,13 @@ func TestAgentMixedTransportIntegration(t *testing.T) {
 		if contract {
 			operations = append(operations, "change.contract")
 		}
+		if len(projectSamples) > 0 {
+			operations = append(operations, "project.read")
+			if projectSymbol != "" {
+				operations = append(operations, "project.search")
+			}
+			require.GreaterOrEqual(t, rounds, len(operations), "each project operation needs a workload sample")
+		}
 		start := make(chan struct{})
 		var wg sync.WaitGroup
 		for index, client := range pool {
@@ -412,6 +487,11 @@ func TestAgentMixedTransportIntegration(t *testing.T) {
 						case "read":
 							file := (round*31 + index*17) % files
 							return agentMixedRead(ctx, client, agentMixedPath(f.primary, file), agentMixedSource(file, declarations))
+						case "project.read":
+							sample := projectSamples[(round+index)%len(projectSamples)]
+							return agentMixedRead(ctx, client, sample.Path, sample.Content)
+						case "project.search":
+							return agentProjectSearch(ctx, client, projectSymbol, filepath.Join(f.primary, "project", projectSubdir), f.primary)
 						case "change.contract":
 							raw, err := client.tool(ctx, "change", map[string]any{"operation": "contract", "target": map[string]any{"symbols": []string{contractTarget}}, "output": map[string]any{"format": "json", "max_tokens": 3000}})
 							if err != nil {
@@ -516,7 +596,7 @@ func TestAgentMixedTransportIntegration(t *testing.T) {
 		writePhase()
 		phases = append(phases, phase)
 	}
-	data, err := json.MarshalIndent(map[string]any{"files": files, "declarations_per_file": declarations, "nodes": nodes, "edges": edges, "rounds": rounds, "resolved_callers": resolvedCallers, "contract": contract, "mutations": mutations, "profile_kind": profileKind, "cold_ms": cold, "warm_ms": warm, "slow_threshold_ms": slow.Milliseconds(), "errors": errors, "phases": phases}, "", "  ")
+	data, err := json.MarshalIndent(map[string]any{"files": files, "declarations_per_file": declarations, "nodes": nodes, "edges": edges, "rounds": rounds, "resolved_callers": resolvedCallers, "contract": contract, "mutations": mutations, "profile_kind": profileKind, "project_subdir": projectSubdir, "project_files": projectFiles, "project_symbol": projectSymbol, "cold_ms": cold, "warm_ms": warm, "slow_threshold_ms": slow.Milliseconds(), "errors": errors, "phases": phases}, "", "  ")
 	require.NoError(t, err)
 	f.write(filepath.Join(f.root, "mixed-transport.json"), string(data)+"\n")
 	agentCaptureProfile(t, f, addr, "heap", "heap.pprof")

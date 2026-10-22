@@ -159,6 +159,28 @@ saved before checking session cleanup, preserving completed samples if cleanup
 fails. The script allows 20 minutes. In the manual `Agent transport` workflow,
 choose `mixed`; its client count selects one phase with an additional writer.
 
+To include an actual subdirectory of this checkout in the synthetic workload,
+copy it into the private fixture repository:
+
+```bash
+GOMAXPROCS=2 GORTEX_AGENT_SCENARIO=mixed \
+GORTEX_AGENT_PROJECT_SUBDIR=bench/fixtures/di/spring/src/main/java/com/example/users \
+GORTEX_AGENT_PROJECT_SYMBOL=UserService \
+GORTEX_AGENT_MIXED_CLIENTS=1,4 \
+GORTEX_AGENT_FILES=32 GORTEX_AGENT_DECLARATIONS=2 GORTEX_AGENT_ROUNDS=20 \
+GORTEX_AGENT_ARTIFACT_DIR=/tmp/gortex-project-profile \
+nice -n 10 bash scripts/test-agent-transport.sh
+```
+
+The source directory must stay inside this checkout. The runner rejects symlinks
+and special files, limits the snapshot to 2,000 files and 64 MiB, and reads the
+source only. The private test repository receives the copies; its daemon uses
+separate XDG directories, SQLite storage and a Unix socket. Each phase includes
+reads of those copies and, when `GORTEX_AGENT_PROJECT_SYMBOL` is set, searches
+for that symbol. `mixed-transport.json` records the selected directory, file
+count, per-operation latency and errors. Inspect `clients-N/cpu.pprof` with
+`go tool pprof -top`. This test does not install or restart the working daemon.
+
 Each phase saves a CPU profile. The first request lasting at least
 `GORTEX_AGENT_SLOW_REQUEST` (default `2s`, allowed `100ms` to `30s`) also triggers
 a goroutine snapshot and a bounded CPU profile while it is pending. A failed
