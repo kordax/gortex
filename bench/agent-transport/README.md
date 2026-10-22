@@ -234,7 +234,7 @@ SQLite generation handles against full reads, and reject full hydration when a
 valid aggregate row exists.
 
 ```sh
-GOTOOLCHAIN=go1.27.2 GOMAXPROCS=4 go test ./internal/mcp \
+GOTOOLCHAIN=go1.27.3 GOMAXPROCS=4 go test ./internal/mcp \
   -run '^$' -bench '^BenchmarkContractParamCountHighFanIn$' \
   -benchmem -benchtime=100ms -count=5 -cpu=4
 ```
@@ -256,7 +256,7 @@ its sampled CPU profile showed resolver work and SQLite reads. The historical
 ## Warm filesystem census benchmark
 
 ```sh
-GOTOOLCHAIN=go1.27.2 GOMAXPROCS=4 go test ./internal/indexer \
+GOTOOLCHAIN=go1.27.3 GOMAXPROCS=4 go test ./internal/indexer \
   -run '^$' -bench '^BenchmarkWarmCensusIgnoredFilesSQLite$' \
   -benchmem -benchtime=10x -count=3 -timeout=5m
 ```
@@ -280,7 +280,7 @@ Capture CPU samples only after fixture setup and warmup:
 
 ```sh
 gortex_census_artifacts=$(mktemp -d)
-GOTOOLCHAIN=go1.27.2 GOMAXPROCS=4 \
+GOTOOLCHAIN=go1.27.3 GOMAXPROCS=4 \
 GORTEX_CENSUS_CPU_PROFILE="$gortex_census_artifacts/census" \
 go test ./internal/indexer -run '^$' \
   -bench '^BenchmarkWarmCensusIgnoredFilesSQLite$/ignored_files_16384$' \

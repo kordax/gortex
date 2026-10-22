@@ -5,7 +5,7 @@ These workloads use temporary source trees, private SQLite databases and the rea
 Run the correctness checks first:
 
 ```sh
-GOTOOLCHAIN=go1.27.2 go test -race -timeout=10m ./internal/indexer \
+GOTOOLCHAIN=go1.27.3 go test -race -timeout=10m ./internal/indexer \
   -run 'Test(Incremental(Performance|RestoresType)|DerivedPublicationFrontier|Contract(EnvOwners|OwnerRefresh))' -count=1
 ```
 
@@ -16,7 +16,7 @@ Structural publication retires incident derived edges even when a family's seman
 Attribution cache tests cover same-file priority, ambiguous names, method call sites, cross-file functions, function-only projection, the batched fallback and cache lifetime:
 
 ```sh
-GOTOOLCHAIN=go1.27.2 go test -race -timeout=2m ./internal/resolver \
+GOTOOLCHAIN=go1.27.3 go test -race -timeout=2m ./internal/resolver \
   -run '^TestIncrementalAttributionCache' -count=1
 ```
 
@@ -25,7 +25,7 @@ The cache seeds only changed-file nodes. Dataflow binding requests package funct
 Run the public operation benchmark:
 
 ```sh
-GOTOOLCHAIN=go1.27.2 GOMAXPROCS=4 go test ./internal/indexer \
+GOTOOLCHAIN=go1.27.3 GOMAXPROCS=4 go test ./internal/indexer \
   -run '^$' -bench '^BenchmarkIncrementalPublicOneFileSQLite$' \
   -benchtime=5x -count=3 -benchmem -timeout=15m
 ```
@@ -48,7 +48,7 @@ Capture CPU only after cold setup and warm-up:
 ```sh
 artifact_dir=$(mktemp -d /tmp/gortex-incremental.XXXXXX)
 GORTEX_INCREMENTAL_CPU_PROFILE="$artifact_dir/cpu" \
-GOTOOLCHAIN=go1.27.2 GOMAXPROCS=4 go test ./internal/indexer \
+GOTOOLCHAIN=go1.27.3 GOMAXPROCS=4 go test ./internal/indexer \
   -run '^$' -bench '^BenchmarkIncrementalPublicOneFileSQLite/files=512/shape$' \
   -benchtime=20x -count=1 -benchmem -timeout=15m
 
@@ -62,7 +62,7 @@ Keep the fixture size, namespace, binary, Go version, `GOMAXPROCS` and measureme
 Compare the scoped inference algorithm with the retained scan algorithm on identical SQLite data:
 
 ```sh
-GOTOOLCHAIN=go1.27.2 GOMAXPROCS=4 go test ./internal/resolver \
+GOTOOLCHAIN=go1.27.3 GOMAXPROCS=4 go test ./internal/resolver \
   -run '^$' -bench '^BenchmarkScopedInferenceSQLitePaired$' \
   -benchtime=200ms -count=3 -benchmem -timeout=15m
 ```
@@ -80,7 +80,7 @@ An interface in the affected frontier retains the original implements scan, with
 Existing SQL plan checks are useful alongside the workloads:
 
 ```sh
-GOTOOLCHAIN=go1.27.2 go test -race -timeout=10m ./internal/graph/store_sqlite \
+GOTOOLCHAIN=go1.27.3 go test -race -timeout=10m ./internal/graph/store_sqlite \
   -run '^(TestHotQueryPlansLocked|TestAdjacencyPlanLocksDuringBulkLoad|TestPreparedStatementPlansNeverScanBigTables|TestGenerationScopedReadPlansUseGenerationIndexes|TestScopedEdgeProjectionPlansStayInsideRequestedFiles)$' \
   -count=1
 ```

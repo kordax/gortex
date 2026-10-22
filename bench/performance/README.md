@@ -74,7 +74,7 @@ contact the maintainer's daemon.
 ## Focused profiles and regressions
 
 ```sh
-GOTOOLCHAIN=go1.27.2 GOMAXPROCS=4 go test ./bench/workloads \
+GOTOOLCHAIN=go1.27.3 GOMAXPROCS=4 go test ./bench/workloads \
   -run '^$' -bench '^BenchmarkWarmSearch/files=128$' -cpu=4 \
   -benchtime=2s -count=1 -cpuprofile=/tmp/gortex-search.cpu.pprof \
   -memprofile=/tmp/gortex-search.mem.pprof -o /tmp/gortex-workloads.test
@@ -82,7 +82,7 @@ GOTOOLCHAIN=go1.27.2 GOMAXPROCS=4 go test ./bench/workloads \
 go tool pprof -top /tmp/gortex-workloads.test /tmp/gortex-search.cpu.pprof
 go tool pprof -alloc_space -top /tmp/gortex-workloads.test /tmp/gortex-search.mem.pprof
 
-GOTOOLCHAIN=go1.27.2 go test -race ./bench/workloads
+GOTOOLCHAIN=go1.27.3 go test -race ./bench/workloads
 python3 -m unittest discover -s bench/performance -p 'test_*.py'
 ```
 
@@ -106,7 +106,7 @@ A paired control keeps every other SQLite capability active and changes only
 ranking hydration, sharing the same indexed fixture and process:
 
 ```sh
-GOTOOLCHAIN=go1.27.2 GOMAXPROCS=4 go test ./bench/workloads \
+GOTOOLCHAIN=go1.27.3 GOMAXPROCS=4 go test ./bench/workloads \
   -run '^$' -bench '^BenchmarkRankingProjection$' -benchmem \
   -benchtime=300ms -count=7 -cpu=4
 ```

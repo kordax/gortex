@@ -24,10 +24,10 @@
 Тест не привязан к имени выбранного индекса или полному тексту плана. Он проверяет `SEARCH` вместо `SCAN` для дочернего FK-поиска. Это требование к данному пути доступа, а не запрет всех сканирований в приложении: массовое чтение может обоснованно выбирать сканирование.
 
 ```bash
-GOTOOLCHAIN=go1.27.2 go test -race -count=1 -timeout=5m \
+GOTOOLCHAIN=go1.27.3 go test -race -count=1 -timeout=5m \
   ./internal/graph/store_sqlite -run '^TestForeignKeyChildIndexes'
 
-GOTOOLCHAIN=go1.27.2 go test -race -timeout=25m \
+GOTOOLCHAIN=go1.27.3 go test -race -timeout=25m \
   ./internal/graph/store_sqlite
 ```
 
@@ -38,7 +38,7 @@ GOTOOLCHAIN=go1.27.2 go test -race -timeout=25m \
 Benchmark сравнивает свежую схему с историческим отсутствием индекса `node_rowid`. Он создаёт три поколения в отдельных временных БД и удаляет одно, оставляя два. Подготовка данных и проверка результата исключены из `ns/op`; жёсткого порога времени нет.
 
 ```bash
-GOTOOLCHAIN=go1.27.2 go test -run '^$' \
+GOTOOLCHAIN=go1.27.3 go test -run '^$' \
   -bench '^BenchmarkForeignKeyGenerationPrune$' -benchtime=1x -benchmem \
   ./internal/graph/store_sqlite
 ```
@@ -49,11 +49,11 @@ GOTOOLCHAIN=go1.27.2 go test -run '^$' \
 
 ```bash
 artifacts=$(mktemp -d)
-GOTOOLCHAIN=go1.27.2 go test -run '^$' \
+GOTOOLCHAIN=go1.27.3 go test -run '^$' \
   -bench '^BenchmarkForeignKeyGenerationPrune/steps=1000/indexed=true$' \
   -benchtime=1x -cpuprofile="$artifacts/cpu.out" -memprofile="$artifacts/heap.out" \
   -o "$artifacts/store_sqlite.test" ./internal/graph/store_sqlite
-GOTOOLCHAIN=go1.27.2 go tool pprof -top "$artifacts/cpu.out"
+GOTOOLCHAIN=go1.27.3 go tool pprof -top "$artifacts/cpu.out"
 ```
 
 Профиль всего процесса включает подготовку БД, даже если benchmark-таймер остановлен. Для длительных ожиданий дополнительно нужны block/mutex-профили и отмена контекста, а для транспортных задержек используется отдельный [агентский стенд](../bench/agent-transport/README.md). Установленная причина SQLite-очистки не доказывает причину прежних 59-секундных MCP-вызовов.

@@ -3,8 +3,8 @@
 These Go benchmarks generate deterministic Go source in temporary directories and use the real indexer and SQLite store. They never start a daemon, read tracked repositories, call an LLM, or fetch an embedding model. Each test or benchmark installs a private test environment before constructing the indexer.
 
 ```sh
-GOTOOLCHAIN=go1.27.2 go test -race ./bench/workloads
-GOTOOLCHAIN=go1.27.2 go test ./bench/workloads -run '^$' \
+GOTOOLCHAIN=go1.27.3 go test -race ./bench/workloads
+GOTOOLCHAIN=go1.27.3 go test ./bench/workloads -run '^$' \
   -bench . -benchmem -benchtime=1s -count=5 -cpu=4 > before.txt
 # Apply a candidate optimization, then repeat into after.txt.
 # Compare the samples with benchstat, including its confidence intervals.
@@ -29,7 +29,7 @@ The parser registry is shared across iterations within each benchmark. The SQLit
 For CPU or allocation diagnosis, select one case and retain its profile alongside the benchmark samples:
 
 ```sh
-GOTOOLCHAIN=go1.27.2 go test ./bench/workloads -run '^$' \
+GOTOOLCHAIN=go1.27.3 go test ./bench/workloads -run '^$' \
   -bench '^BenchmarkWarmSearch/files=128$' -benchtime=3s -count=1 -cpu=4 \
   -cpuprofile=/tmp/gortex-search.cpu.pprof -memprofile=/tmp/gortex-search.mem.pprof
 ```

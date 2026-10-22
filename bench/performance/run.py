@@ -53,7 +53,7 @@ def main():
         parser.error("--out must be new or empty; existing results are preserved")
     output.mkdir(parents=True, exist_ok=True, mode=0o700)
     env = dict(os.environ, GOMAXPROCS=str(args.cpus), OTEL_TRACES_EXPORTER="none")
-    env.setdefault("GOTOOLCHAIN", "go1.27.2")
+    env.setdefault("GOTOOLCHAIN", "go1.27.3")
     # Compiler/module caches may be reused; every executed workload has its own
     # testenv sandbox or the existing private daemon fixture.
     go_version = subprocess.check_output(["go", "version"], cwd=ROOT, env=env, text=True).strip()

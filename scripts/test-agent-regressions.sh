@@ -19,7 +19,7 @@ fi
 
 artifacts="${GORTEX_AGENT_REGRESSION_ARTIFACT_DIR:-$(mktemp -d "${TMPDIR:-/tmp}/gortex-agent-regressions.XXXXXX")}"
 mkdir -p -- "$artifacts"
-export GOTOOLCHAIN="${GOTOOLCHAIN:-go1.27.2}"
+export GOTOOLCHAIN="${GOTOOLCHAIN:-go1.27.3}"
 printf 'Agent regression tests: race detector, %s repetitions, shuffle seed %s\n' "$repeat" "$seed"
 printf 'Artifacts: %s\n' "$artifacts"
 printf 'Running startup admission, batch crash/retry and branch/worktree lifecycle cases...\n'

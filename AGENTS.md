@@ -21,7 +21,7 @@ Gortex is a Go CLI, MCP server and daemon backed by a code graph. Keep changes f
 - `internal/embedding`: providers and shared model loading.
 - `internal/testenv`, `internal/testutil`: reusable test isolation.
 
-Use `.github/workflows/ci.yml` and `go.mod` for build/check conventions. The local installer defaults to the verified `go1.27.2` toolchain; override with `GOTOOLCHAIN` when deliberately testing another version. Go 1.27.2 needs a compatible golangci-lint (2.15.0 was verified); 2.13.1 cannot read its export data.
+Use `.github/workflows/ci.yml` and `go.mod` for build/check conventions. The local installer defaults to the verified `go1.27.3` toolchain; override with `GOTOOLCHAIN` when deliberately testing another version. Go 1.27.3 needs a compatible golangci-lint (2.15.0 was verified); 2.13.1 cannot read its export data.
 
 ## Verification
 

@@ -15,7 +15,7 @@ Default: build this checkout and install into $HOME/.local/bin/gortex.
 GORTEX_INSTALL_DIR overrides the destination directory (for example /usr/local/bin).
 Use your normal user for source builds. A trusted prebuilt binary can be installed
 system-wide with sudo env GORTEX_INSTALL_DIR=/usr/local/bin bash scripts/install-local.sh --binary PATH.
-GOTOOLCHAIN overrides the tested default toolchain, go1.27.2.
+GOTOOLCHAIN overrides the tested default toolchain, go1.27.3.
 Requires Linux, Bash, coreutils and, for a source build, Git, Go and C/C++ tools.
 The script does not modify configuration, download a published release, or
 restart the daemon. A running daemon keeps its current executable until you
@@ -214,12 +214,12 @@ else
         revision+=.dirty
     fi
     build_date=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-    log "Building checkout $revision with ${GOTOOLCHAIN:-go1.27.2}..."
+    log "Building checkout $revision with ${GOTOOLCHAIN:-go1.27.3}..."
     log 'The first build may download the Go toolchain and module dependencies.'
     start_spinner
     if (
         cd -- "$repo_root"
-        GOTOOLCHAIN="${GOTOOLCHAIN:-go1.27.2}" CGO_ENABLED=1 go build \
+        GOTOOLCHAIN="${GOTOOLCHAIN:-go1.27.3}" CGO_ENABLED=1 go build \
             -mod=readonly -trimpath -buildvcs=true \
             -ldflags "-s -w -X main.commit=$revision -X main.date=$build_date" \
             -o "$candidate" ./cmd/gortex
