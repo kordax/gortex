@@ -101,9 +101,11 @@ func (s *Store) PruneAnalysisGenerations(ctx context.Context, keep, batch int) e
 }
 
 func (s *Store) pruneAnalysisGenerationChunk(ctx context.Context, generationID int64, table analysisGenerationGCTable, batch int) (int64, bool, error) {
-	s.writeMu.Lock()
+	if err := s.writeMu.LockContext(ctx); err != nil {
+		return 0, false, err
+	}
 	defer s.writeMu.Unlock()
-	tx, err := s.beginWrite()
+	tx, err := s.beginWriteContext(ctx)
 	if err != nil {
 		return 0, false, err
 	}
@@ -148,9 +150,11 @@ func analysisGenerationPrunableTx(tx *sql.Tx, generationID int64) (bool, error) 
 }
 
 func (s *Store) finishPruneAnalysisGeneration(ctx context.Context, generationID int64) error {
-	s.writeMu.Lock()
+	if err := s.writeMu.LockContext(ctx); err != nil {
+		return err
+	}
 	defer s.writeMu.Unlock()
-	tx, err := s.beginWrite()
+	tx, err := s.beginWriteContext(ctx)
 	if err != nil {
 		return err
 	}
