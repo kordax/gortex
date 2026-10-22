@@ -38,6 +38,8 @@ go mod tidy -diff
 
 Choose the affected package rather than running every command for every edit. Full CI uses `go test -race -timeout=45m -coverprofile=coverage.out ./...`; SQLite and indexer can each take about 10 to 12 minutes under race. Report interrupted or failed runs honestly. Do not weaken checks or add suppressions to obtain a pass. Before every push, complete the applicable lint, security checks and tests.
 
+When only the version string, documentation or release metadata changes after checks have passed for identical production code in the same task, reuse those results. Run focused checks for the changed release behavior and package contents; do not repeat the full race suite without a concrete new risk. Record which checks were reused and which ran after the last change. Before tagging, verify the final clean commit's binary version, fork identity, static linkage and published package contents.
+
 For real MCP transport load, run `bash scripts/test-agent-transport.sh`; see [the scenario guide](bench/agent-transport/README.md) for parameters, profiles and limits. It requires no LLM or external model service. Installer changes have fast contract tests: `bash scripts/test-install-local.sh` (also part of the normal Go suite).
 
 ## Contracts to preserve
