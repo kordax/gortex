@@ -1695,6 +1695,7 @@ func generationCapabilityChecklist() []capabilityCase {
 		{iface: (*graph.CheckedAllGenerationsRepoEvicter)(nil), skip: skipAdmin},
 		{iface: (*graph.AnalysisGenerationStore)(nil), skip: skipSidecar},
 		{iface: (*graph.AnalysisQueryStore)(nil), skip: skipSidecar},
+		{iface: (*graph.AnalysisProcessReachability)(nil), skip: "read-only analysis-generation snapshot, not payload view_gen; active-generation isolation and cancellation are proved by TestAnalysisReachableNodesContext"},
 		{iface: (*graph.AtomicVectorCorpusInstaller)(nil), skip: skipSidecar},
 		{iface: (*graph.BFSCapable)(nil), probe: "BFS"},
 		{iface: (*graph.BlameEnrichmentReader)(nil), skip: skipSidecar},

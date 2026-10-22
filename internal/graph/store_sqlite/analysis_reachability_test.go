@@ -74,4 +74,15 @@ func TestAnalysisReachableNodesContext(t *testing.T) {
 	rows, err = store.AnalysisReachableNodesContext(t.Context(), id, []string{"step"})
 	require.NoError(t, err)
 	require.Equal(t, []string{"step"}, rows, "errors must leave the store usable")
+
+	// Replacing the active analysis generation must revoke a previously valid
+	// receipt, even though its process rows still exist for later pruning.
+	next := buildMinimalAnalysisGeneration(t, store, "replacement", 0, true)
+	require.NotEqual(t, id, next)
+	rows, err = store.AnalysisReachableNodesContext(t.Context(), id, []string{"entry", "step"})
+	require.ErrorIs(t, err, graph.ErrAnalysisGenerationInactive)
+	require.Nil(t, rows, "a superseded generation must not leak reachability")
+	rows, err = store.AnalysisReachableNodesContext(t.Context(), next, []string{"entry", "step", "replacement-node"})
+	require.NoError(t, err)
+	require.Empty(t, rows, "the replacement has no processes from the old generation")
 }
