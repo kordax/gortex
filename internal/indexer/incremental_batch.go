@@ -1000,14 +1000,27 @@ func (idx *Indexer) updateIncrementalSearch(stages []*incrementalBatchStage) {
 
 func incomingRestubsForReplacement(stages []*incrementalBatchStage, view incrementalPriorView) []*graph.Edge {
 	evicted := structuralPriorIDs(stages)
+	freshKinds := make(map[string]graph.NodeKind)
+	replacedFiles := make(map[string]struct{}, len(stages))
+	for _, stage := range stages {
+		replacedFiles[stage.graphPath] = struct{}{}
+		if stage.result == nil {
+			continue
+		}
+		for _, node := range stage.result.Nodes {
+			if node != nil {
+				freshKinds[node.ID] = node.Kind
+			}
+		}
+	}
 	var parked []*graph.Edge
 	for _, stage := range stages {
 		for _, node := range stage.priorNodes {
-			if node == nil || node.Name == "" || !graph.IsReferenceableSymbol(node.Kind) {
+			if node == nil {
 				continue
 			}
 			for _, edge := range view.inByNode[node.ID] {
-				if edge == nil || !graph.IsResolvableRefEdge(edge.Kind) || graph.IsUnresolvedTarget(edge.To) {
+				if edge == nil || graph.IsUnresolvedTarget(edge.To) {
 					continue
 				}
 				if _, sourceEvicted := evicted[edge.From]; sourceEvicted {
@@ -1015,8 +1028,23 @@ func incomingRestubsForReplacement(stages []*incrementalBatchStage, view increme
 				}
 				copy := *edge
 				copy.Meta = maps.Clone(edge.Meta)
-				graph.StashRestubProvenance(&copy)
-				copy.To = graph.UnresolvedMarker + node.Name
+				if !graph.IsResolvableRefEdge(edge.Kind) {
+					// Source-owned edges have no unresolved form. Retain them
+					// only when their exact target identity and kind survive;
+					// changed sources and file-owned facts must be re-extracted.
+					if kind, survives := freshKinds[node.ID]; !survives || kind != node.Kind {
+						continue
+					}
+					if _, ownerChanged := replacedFiles[edge.FilePath]; ownerChanged {
+						continue
+					}
+				} else {
+					if node.Name == "" || !graph.IsReferenceableSymbol(node.Kind) {
+						continue
+					}
+					graph.StashRestubProvenance(&copy)
+					copy.To = graph.UnresolvedMarker + node.Name
+				}
 				parked = append(parked, &copy)
 			}
 		}

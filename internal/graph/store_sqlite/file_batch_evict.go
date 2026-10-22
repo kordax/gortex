@@ -184,7 +184,9 @@ func (s *Store) evictByPredicateWithReplacement(predicate string, arg any, scope
 		// larger pass, and on a real package it fired on nearly every
 		// reindex. The eviction still describes its RESOLUTION delta
 		// exactly, which is the only question a receipt answers; the
-		// destruction is a real pre-existing defect tracked separately.
+		// raw eviction remains destructive. Atomic file replacement also
+		// republishes source-owned non-resolvable incoming edges when the
+		// same target identity and kind survive, via its replacement payload.
 		delta := newSQLiteMutationReceiptAccumulator()
 		rows, err := tx.QueryContext(ctx, `SELECT id, kind, name, qual_name, file_path FROM nodes WHERE `+nodeScoped, nodeArgs...)
 		if err == nil {
