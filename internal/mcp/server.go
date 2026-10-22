@@ -898,6 +898,13 @@ func (ts *tokenStats) setClientName(name string) {
 //
 // returned and fullFile are token counts (cl100k_base via internal/tokens).
 func (ts *tokenStats) record(node *graph.Node, tool string, returned, fullFile int64) {
+	ts.recordContext(context.Background(), node, tool, returned, fullFile)
+}
+
+// Savings persistence must not hold an otherwise completed response indefinitely.
+const savingsPersistenceBudget = 200 * time.Millisecond
+
+func (ts *tokenStats) recordContext(ctx context.Context, node *graph.Node, tool string, returned, fullFile int64) {
 	ts.mu.Lock()
 	saved := max(fullFile-returned, 0)
 	ts.tokensSaved += saved
@@ -963,7 +970,9 @@ func (ts *tokenStats) record(node *graph.Node, tool string, returned, fullFile i
 	// synchronization guards concurrent writers, and the ledger write
 	// shouldn't block new record() calls on the hot path.
 	if store != nil {
-		store.AddObservation(savings.Observation{
+		persistCtx, cancel := context.WithTimeout(ctx, savingsPersistenceBudget)
+		defer cancel()
+		store.AddObservationContext(persistCtx, savings.Observation{
 			Repo:      repo,
 			Language:  language,
 			Tool:      tool,

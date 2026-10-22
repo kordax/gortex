@@ -139,7 +139,7 @@ var retrievalSavingsTools = map[string]bool{
 // tool is the LEGACY tool name (the facade forwards under it, so the ledger's
 // per-tool breakdown stays comparable across surfaces). No-ops for every tool
 // outside retrievalSavingsTools, for error results, and for responses that
-// cite no file the session has not already been credited for.
+// cite no resolvable file. Repeated pages record returned tokens but no new baseline.
 func (s *Server) recordRetrievalSavings(ctx context.Context, tool string, res *mcp.CallToolResult) {
 	if s == nil || res == nil || res.IsError || !retrievalSavingsTools[tool] {
 		return
@@ -182,6 +182,10 @@ func (s *Server) recordFileSetBaselineSavings(ctx context.Context, tool string, 
 		if err != nil || info.IsDir() || info.Size() == 0 {
 			continue
 		}
+		if attrPath == "" {
+			attrPath = rel
+			language = s.detectLanguageForPath(ctx, abs, rel)
+		}
 		// Claim the file before counting it: a file already credited to this
 		// session was already paid for by whichever call surfaced it first.
 		if !stats.creditFile(abs) {
@@ -189,15 +193,13 @@ func (s *Server) recordFileSetBaselineSavings(ctx context.Context, tool string, 
 		}
 		fullFile += int64(tokens.EstimateFromSample(int(info.Size()), fileHeadSample(abs)))
 		credited++
-		if attrPath == "" {
-			attrPath = rel
-			language = s.detectLanguageForPath(ctx, abs, rel)
-		}
 	}
-	if credited == 0 || fullFile <= 0 {
+	// Repeated pages still return billable tokens even though their files
+	// cannot contribute another baseline. Only unresolved citations book nothing.
+	if attrPath == "" {
 		return
 	}
-	stats.record(s.fileAttributionNode(attrPath, language), tool, tokens.CachedCountInt64(payload), fullFile)
+	stats.recordContext(ctx, s.fileAttributionNode(attrPath, language), tool, tokens.CachedCountInt64(payload), fullFile)
 }
 
 // baselineSampleBytes bounds the calibration read per credited file. The

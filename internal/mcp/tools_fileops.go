@@ -765,13 +765,15 @@ func (s *Server) recordFileBaselineSavings(ctx context.Context, tool, relPath, l
 	// marshalled node list or an editing-context bundle, whose ratio is
 	// nothing like the source it is standing in for, so calibrating on it
 	// mis-priced every summary and editing-context baseline.
-	fullFile := int64(tokens.EstimateFromSample(int(info.Size()), fileHeadSample(abs)))
+	var fullFile int64
 	stats := s.tokenStatsFor(ctx)
 	// This charges the whole file as the counterfactual, so claim it for the
 	// session: a later retrieval page that merely cites the file must not
 	// bill it a second time (savings_retrieval.go).
-	stats.creditFile(abs)
-	stats.record(s.fileAttributionNode(relPath, language), tool, returned, fullFile)
+	if stats.creditFile(abs) {
+		fullFile = int64(tokens.EstimateFromSample(int(info.Size()), fileHeadSample(abs)))
+	}
+	stats.recordContext(ctx, s.fileAttributionNode(relPath, language), tool, returned, fullFile)
 }
 
 // pendingSavings is one source-read observation assembled before an
@@ -790,10 +792,15 @@ func (s *Server) recordPendingSavings(ctx context.Context, pending []pendingSavi
 	if len(pending) == 0 {
 		return
 	}
+	ctx, cancel := context.WithTimeout(ctx, savingsPersistenceBudget)
+	defer cancel()
 	stats := s.tokenStatsFor(ctx)
 	for _, obs := range pending {
-		stats.creditFile(obs.absPath)
-		stats.record(s.savingsAttributionNode(obs.node), obs.tool, obs.returned, obs.fullFile)
+		fullFile := obs.fullFile
+		if !stats.creditFile(obs.absPath) {
+			fullFile = 0
+		}
+		stats.recordContext(ctx, s.savingsAttributionNode(obs.node), obs.tool, obs.returned, fullFile)
 	}
 }
 
@@ -1821,8 +1828,10 @@ func (s *Server) handleReadFile(ctx context.Context, req mcp.CallToolRequest) (*
 			fullFile = int64(tokens.EstimateFromSample(originalBytes, contentStr))
 		}
 		stats := s.tokenStatsFor(ctx)
-		stats.creditFile(absPath)
-		stats.record(s.fileAttributionNode(relPath, language), "read_file", returned, fullFile)
+		if !stats.creditFile(absPath) {
+			fullFile = 0
+		}
+		stats.recordContext(ctx, s.fileAttributionNode(relPath, language), "read_file", returned, fullFile)
 	}
 
 	s.attachFileDependents(ctx, result, relPath)

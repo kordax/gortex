@@ -2,12 +2,15 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"io"
 	"os"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/require"
 
 	"github.com/zzet/gortex/internal/savings"
 )
@@ -37,6 +40,37 @@ func captureStdout(t *testing.T, fn func()) string {
 	_ = w.Close()
 	wg.Wait()
 	return buf.String()
+}
+
+func TestSavingsExplainsEstimateBasis(t *testing.T) {
+	require.Contains(t, savingsCmd.Long, "gross estimates")
+	require.Contains(t, savingsCmd.Long, "not net token savings or measured billing savings")
+	require.Contains(t, savingsCmd.Long, "comparison rate, not the agent's detected model")
+	for _, calls := range []int64{0, 2} {
+		snap := savings.File{Totals: savings.Totals{TokensSaved: 100, TokensReturned: 50, CallsCounted: calls}}
+		text := captureStdout(t, func() { emitSavingsDashboard(snap, nil, nil, nil, "fixture.sqlite") })
+		require.Contains(t, text, savingsEstimateBasis)
+		require.Contains(t, text, savingsCostBasis)
+	}
+}
+
+func TestSavingsJSONKeepsTotalsAndExplainsEstimates(t *testing.T) {
+	snap := savings.File{Totals: savings.Totals{TokensSaved: 100, TokensReturned: 50, CallsCounted: 2}}
+	var emitErr error
+	text := captureStdout(t, func() { emitErr = emitSavingsJSON(snap, nil, nil, nil, "fixture.sqlite") })
+	require.NoError(t, emitErr)
+	var out map[string]any
+	require.NoError(t, json.Unmarshal([]byte(text), &out))
+	require.Equal(t, savingsEstimateBasis, out["estimate_basis"])
+	require.Equal(t, savingsCostBasis, out["cost_basis"])
+	require.Equal(t, float64(100), out["tokens_saved"])
+	require.Equal(t, float64(50), out["tokens_returned"])
+	require.Equal(t, float64(2), out["calls_counted"])
+	costs, ok := out["cost_avoided_usd"].(map[string]any)
+	require.True(t, ok)
+	for model, cost := range savings.CostAvoidedAll(100) {
+		require.Equal(t, cost, costs[model])
+	}
 }
 
 func TestPickHeadlineCost_RespectsModelFlag(t *testing.T) {

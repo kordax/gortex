@@ -1,7 +1,9 @@
 package persistence
 
 import (
+	"context"
 	"database/sql"
+	"database/sql/driver"
 	"fmt"
 	"time"
 )
@@ -49,13 +51,59 @@ const savingsLegacyMigrationKind = "savings_files"
 // AddSavingsObservation books one observation: the event row, the
 // affected totals buckets, and the meta stamps, in a single transaction.
 func (s *SidecarStore) AddSavingsObservation(ev SavingsEvent) error {
+	return s.AddSavingsObservationContext(context.Background(), ev)
+}
+
+// AddSavingsObservationContext bounds writer admission and SQL work by ctx.
+func (s *SidecarStore) AddSavingsObservationContext(ctx context.Context, ev SavingsEvent) error {
 	if s == nil {
 		return nil
 	}
-	s.writeMu.Lock()
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if s.writeMu.TryLock() {
+			break
+		}
+		timer := time.NewTimer(5 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-timer.C:
+		}
+	}
 	defer s.writeMu.Unlock()
 
-	tx, err := s.db.Begin()
+	conn, err := s.db.Conn(ctx)
+	if err != nil {
+		return fmt.Errorf("persistence: savings connection: %w", err)
+	}
+	defer conn.Close()
+	// SQLite's busy handler can outlive context cancellation. Bound its
+	// per-connection wait as well, then restore it before returning to the pool.
+	if deadline, ok := ctx.Deadline(); ok {
+		var originalBusy int
+		if err := conn.QueryRowContext(ctx, "PRAGMA busy_timeout").Scan(&originalBusy); err != nil {
+			return err
+		}
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return context.DeadlineExceeded
+		}
+		busyMillis := min(originalBusy, max(1, int(remaining.Milliseconds())))
+		if _, err := conn.ExecContext(ctx, fmt.Sprintf("PRAGMA busy_timeout=%d", busyMillis)); err != nil {
+			return err
+		}
+		defer func() {
+			if _, err := conn.ExecContext(context.Background(), fmt.Sprintf("PRAGMA busy_timeout=%d", originalBusy)); err != nil {
+				// Do not leak the temporary timeout to unrelated sidecar users.
+				_ = conn.Raw(func(any) error { return driver.ErrBadConn })
+			}
+		}()
+	}
+	tx, err := conn.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("persistence: savings tx: %w", err)
 	}
@@ -67,7 +115,7 @@ func (s *SidecarStore) AddSavingsObservation(ev SavingsEvent) error {
 	}
 	tsN := ts.UTC().UnixNano()
 
-	if _, err := tx.Exec(
+	if _, err := tx.ExecContext(ctx,
 		`INSERT INTO savings_events (ts, session_id, tool, repo, language, model, client, returned, saved) VALUES (?,?,?,?,?,?,?,?,?)`,
 		tsN, ev.SessionID, ev.Tool, ev.Repo, ev.Language, ev.Model, ev.Client, ev.Returned, ev.Saved,
 	); err != nil {
@@ -82,17 +130,17 @@ func (s *SidecarStore) AddSavingsObservation(ev SavingsEvent) error {
 		buckets = append(buckets, "lang:"+ev.Language)
 	}
 	for _, bucket := range buckets {
-		if err := upsertSavingsBucket(tx, bucket, ev.Saved, ev.Returned, 1); err != nil {
+		if err := upsertSavingsBucketContext(ctx, tx, bucket, ev.Saved, ev.Returned, 1); err != nil {
 			return err
 		}
 	}
 
-	if _, err := tx.Exec(
+	if _, err := tx.ExecContext(ctx,
 		`INSERT INTO savings_meta (key, value) VALUES ('first_seen', ?) ON CONFLICT(key) DO NOTHING`, tsN,
 	); err != nil {
 		return fmt.Errorf("persistence: savings meta: %w", err)
 	}
-	if _, err := tx.Exec(
+	if _, err := tx.ExecContext(ctx,
 		`INSERT INTO savings_meta (key, value) VALUES ('last_updated', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`, tsN,
 	); err != nil {
 		return fmt.Errorf("persistence: savings meta: %w", err)
@@ -102,7 +150,11 @@ func (s *SidecarStore) AddSavingsObservation(ev SavingsEvent) error {
 }
 
 func upsertSavingsBucket(tx *sql.Tx, bucket string, saved, returned, calls int64) error {
-	_, err := tx.Exec(
+	return upsertSavingsBucketContext(context.Background(), tx, bucket, saved, returned, calls)
+}
+
+func upsertSavingsBucketContext(ctx context.Context, tx *sql.Tx, bucket string, saved, returned, calls int64) error {
+	_, err := tx.ExecContext(ctx,
 		`INSERT INTO savings_totals (bucket, saved, returned, calls) VALUES (?,?,?,?)
 		 ON CONFLICT(bucket) DO UPDATE SET
 		   saved    = savings_totals.saved + excluded.saved,

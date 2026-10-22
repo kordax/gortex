@@ -14,6 +14,7 @@
 package savings
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -173,6 +174,12 @@ func emptyFile() File {
 // AddObservation books one source-reading tool call. Durable immediately
 // when the store is sidecar-backed; in-memory otherwise.
 func (s *Store) AddObservation(o Observation) {
+	s.AddObservationContext(context.Background(), o)
+}
+
+// AddObservationContext records atomically or counts a dropped observation when
+// cancellation or a storage error prevents persistence.
+func (s *Store) AddObservationContext(ctx context.Context, o Observation) {
 	if s == nil {
 		return
 	}
@@ -182,7 +189,7 @@ func (s *Store) AddObservation(o Observation) {
 	now := time.Now().UTC()
 
 	if s.sc != nil {
-		err := s.sc.AddSavingsObservation(persistence.SavingsEvent{
+		err := s.sc.AddSavingsObservationContext(ctx, persistence.SavingsEvent{
 			TS:        now,
 			SessionID: o.SessionID,
 			Tool:      o.Tool,

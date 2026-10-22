@@ -27,10 +27,12 @@ var (
 	savingsUTC      bool
 )
 
-// defaultHeadlineModel is the model the headline "Cost avoided" figure is
-// priced against when the caller doesn't pass --model. Set to the model
-// gortex itself runs on so the dollar figure reflects real usage.
+// defaultHeadlineModel is a comparison rate for the headline estimate when
+// --model is absent. It does not identify the model used by the calling agent.
 const defaultHeadlineModel = "claude-opus-4-8"
+
+const savingsEstimateBasis = "Gross estimated token savings: sum of positive whole-file baseline minus response-token differences. Extra response costs do not reduce this total."
+const savingsCostBasis = "Model-rate comparison, not measured billing savings. Excludes prompt caching, subscription terms and other agent costs."
 
 var savingsCmd = &cobra.Command{
 	Use:   "savings",
@@ -53,8 +55,12 @@ once and renamed *.bak.
 
 Percentages are computed over ALL recorded source fetches — including
 uncompressed read_file calls that returned the whole file and saved
-nothing — so the bars reflect how the agent actually reads, not just
-the best cases; per-tool rates live in --verbose.
+nothing. The totals are gross estimates: positive baseline-minus-response
+differences are added, but extra response costs never subtract from savings.
+They are not net token savings or measured billing savings. USD figures compare
+model rates; they exclude prompt caching, subscriptions and other agent costs.
+The default headline model is a comparison rate, not the agent's detected model.
+Per-tool rates live in --verbose.
 
 Override the ledger location with --cache-dir (reads that directory's
 sidecar.sqlite; the one-shot legacy import runs only against the
@@ -175,6 +181,8 @@ func emitSavingsJSON(snap savings.File, buckets []savings.Bucket, modelTotals, c
 	}
 
 	out := map[string]any{
+		"estimate_basis":   savingsEstimateBasis,
+		"cost_basis":       savingsCostBasis,
 		"path":             path,
 		"tokens_saved":     snap.Totals.TokensSaved,
 		"tokens_returned":  snap.Totals.TokensReturned,
@@ -194,10 +202,9 @@ func emitSavingsJSON(snap savings.File, buckets []savings.Bucket, modelTotals, c
 	if len(snap.PerLanguage) > 0 {
 		out["per_language"] = snap.PerLanguage
 	}
-	// Per-model actual attribution: tokens_saved is rescaled into the
-	// model's own tokenizer (cl100k retained as tokens_saved_cl100k) and
-	// the cost is that model's real rate — not the all-models
-	// counterfactual that cost_avoided_usd carries.
+	// Per-model attribution uses the host's model hint. Token counts and
+	// configured model rates remain estimates, including tokenizer scaling;
+	// these values do not measure the caller's bill.
 	if len(modelTotals) > 0 {
 		models := make([]map[string]any, 0, len(modelTotals))
 		for _, m := range modelTotals {
@@ -266,6 +273,9 @@ func emitSavingsDashboard(snap savings.File, buckets []savings.Bucket, modelTota
 		}
 	}
 
+	fmt.Println()
+	fmt.Println(savingsEstimateBasis)
+	fmt.Println(savingsCostBasis)
 	costs := savings.CostAvoidedAll(snap.Totals.TokensSaved)
 	_, headlineModel := pickHeadlineCost(costs, savingsModel)
 	fmt.Println()

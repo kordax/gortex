@@ -27,7 +27,7 @@ import (
 // file, which cannot exercise a file-SET baseline: the point of these tests is
 // that one retrieval page stands in for several whole files, so the fixture
 // has to have several.
-func newRetrievalSavingsServer(t *testing.T, files int) (*Server, *savings.Store, string) {
+func newRetrievalSavingsServer(t testing.TB, files int) (*Server, *savings.Store, string) {
 	t.Helper()
 	// These tests drive the facade names an agent actually calls, so the
 	// session must be on the facade-v1 surface rather than the legacy default.
@@ -161,8 +161,8 @@ func TestReadFamilyBaselineBlocksLaterRetrievalCredit(t *testing.T) {
 
 	found := callToolByName(t, srv, ctx, "search", map[string]any{"operation": "symbols", "query": "Widget"})
 	require.False(t, found.IsError)
-	require.NotContains(t, ledgerByTool(t, store), "search_symbols",
-		"the only cited file was already billed by read_file; the search must add nothing")
+	require.Zero(t, ledgerByTool(t, store)["search_symbols"],
+		"the only cited file was already billed by read_file; the search must add no savings")
 }
 
 // Sessions are the unit of the credited-file set: two agents working the same
@@ -279,6 +279,65 @@ func TestCitedFilesFromResult_WireFormats(t *testing.T) {
 }
 
 // creditFile is the single choke point that stops a file being billed twice.
+func TestSavingsReadFamiliesCreditBaselineOnlyOnce(t *testing.T) {
+	for _, mode := range []string{"summary", "pending", "retrieval_then_summary", "retrieval_then_pending"} {
+		t.Run(mode, func(t *testing.T) {
+			srv, _, dir := newRetrievalSavingsServer(t, 1)
+			ctx := WithSessionID(context.Background(), mode)
+			stats := srv.tokenStatsFor(ctx)
+			record := func() {
+				if strings.HasSuffix(mode, "pending") {
+					srv.recordPendingSavings(ctx, []pendingSavings{{absPath: filepath.Join(dir, "mod0.go"), tool: "get_symbol_source", returned: 1, fullFile: 1000}})
+				} else {
+					srv.recordFileBaselineSavings(ctx, "get_file_summary", "myrepo/mod0.go", "go", "summary")
+				}
+			}
+			if strings.HasPrefix(mode, "retrieval_then_") {
+				srv.recordFileSetBaselineSavings(ctx, "search_symbols", []string{"myrepo/mod0.go"}, "search")
+			} else {
+				record()
+			}
+			beforeSaved, beforeReturned, beforeCalls := stats.tokensSaved, stats.tokensReturned, stats.callCount
+			require.Positive(t, beforeSaved)
+			record()
+			require.Equal(t, beforeSaved, stats.tokensSaved, "the same file baseline cannot be claimed twice")
+			require.Greater(t, stats.tokensReturned, beforeReturned, "repeat output still costs tokens")
+			require.Equal(t, beforeCalls+1, stats.callCount)
+		})
+	}
+}
+
+func TestRepeatedWindowedReadDoesNotMintSavings(t *testing.T) {
+	srv, store, _ := newRetrievalSavingsServer(t, 1)
+	ctx := WithSessionID(context.Background(), "window-repeat")
+	args := map[string]any{"operation": "file", "target": map[string]any{"file": "myrepo/mod0.go"}, "options": map[string]any{"offset": 1, "limit": 4}}
+	first := callToolByName(t, srv, ctx, "read", args)
+	require.False(t, first.IsError, textOfResult(t, first))
+	before, err := store.Snapshot()
+	require.NoError(t, err)
+	require.Positive(t, before.Totals.TokensSaved)
+	second := callToolByName(t, srv, ctx, "read", args)
+	require.False(t, second.IsError, textOfResult(t, second))
+	after, err := store.Snapshot()
+	require.NoError(t, err)
+	require.Equal(t, before.Totals.TokensSaved, after.Totals.TokensSaved)
+	require.Greater(t, after.Totals.TokensReturned, before.Totals.TokensReturned)
+}
+
+func TestRepeatedRetrievalAccountsReturnedTokens(t *testing.T) {
+	srv, _, _ := newRetrievalSavingsServer(t, 1)
+	ctx := WithSessionID(context.Background(), "repeat-output")
+	stats := srv.tokenStatsFor(ctx)
+	paths := []string{"myrepo/mod0.go"}
+	srv.recordFileSetBaselineSavings(ctx, "search_symbols", paths, "search page")
+	beforeSaved, beforeReturned, beforeCalls := stats.tokensSaved, stats.tokensReturned, stats.callCount
+	require.Positive(t, beforeSaved)
+	srv.recordFileSetBaselineSavings(ctx, "search_symbols", paths, "search page")
+	require.Equal(t, beforeSaved, stats.tokensSaved)
+	require.Equal(t, beforeReturned*2, stats.tokensReturned, "repeat output must remain visible in accounting")
+	require.Equal(t, beforeCalls+1, stats.callCount)
+}
+
 func TestTokenStatsCreditFile(t *testing.T) {
 	ts := &tokenStats{}
 	require.True(t, ts.creditFile("/repo/a.go"), "first claim wins")
