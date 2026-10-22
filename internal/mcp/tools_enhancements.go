@@ -2424,6 +2424,9 @@ func (s *Server) collectRepoRoots(scope string) map[string]string {
 // ---------------------------------------------------------------------------
 
 func (s *Server) handleFindDeadCode(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	opts := analysis.FindDeadCodeOptions{}
 	args := req.GetArguments()
 	if v, ok := args["include_variables"].(bool); ok && v {
@@ -2445,8 +2448,23 @@ func (s *Server) handleFindDeadCode(ctx context.Context, req mcp.CallToolRequest
 		opts.SkipCrossRepoNodes = true
 	}
 
+	processes, processQuery, processHeader, ready := s.deadCodeProcesses()
+	if !ready {
+		pending := s.ensureAnalysis()
+		pending.Ready = false
+		if pending.RetryAfter == 0 {
+			pending.RetryAfter = s.analysisRun.retryHint()
+		}
+		return s.respondJSONOrTOON(ctx, req, analysisPendingPayload(pending, "dead_code"))
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	reader := s.readerFor(ctx)
-	entries := analysis.FindDeadCode(reader, s.getProcesses(), nil, opts)
+	entries, err := analysis.FindDeadCodeContext(ctx, reader, processes, nil, opts)
+	if err != nil {
+		return nil, err
+	}
 
 	// dead_code reads the whole graph directly, bypassing the scoped-node
 	// accessors, so narrow its rows to the session workspace + optional
@@ -2461,6 +2479,19 @@ func (s *Server) handleFindDeadCode(ctx context.Context, req mcp.CallToolRequest
 			}
 		}
 		entries = kept
+	}
+
+	entries, processErr := s.filterDeadCodeProcesses(ctx, entries, processQuery, processHeader)
+	if processErr != nil {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		pending := s.ensureAnalysis()
+		pending.Ready = false
+		if pending.RetryAfter == 0 {
+			pending.RetryAfter = s.analysisRun.retryHint()
+		}
+		return s.respondJSONOrTOON(ctx, req, analysisPendingPayload(pending, "dead_code"))
 	}
 
 	// Cap response size — large repos surface thousands of dead-code

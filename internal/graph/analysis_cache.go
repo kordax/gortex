@@ -171,6 +171,14 @@ type AnalysisGenerationStore interface {
 	PruneAnalysisGenerations(ctx context.Context, keep, batch int) error
 }
 
+// AnalysisProcessReachability reads process reachability for requested candidate
+// IDs from one active-generation snapshot. It includes entry points even when
+// they have no step row and must honor cancellation without acquiring a writer
+// lock. This read-only capability cannot mutate or bypass generation fences.
+type AnalysisProcessReachability interface {
+	AnalysisReachableNodesContext(ctx context.Context, generationID int64, nodeIDs []string) ([]string, error)
+}
+
 // AnalysisQueryStore exposes bounded point, batch, top-N, and keyset-paged
 // reads. Empty ID/token inputs always mean an empty result, never an unbounded
 // scan.

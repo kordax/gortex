@@ -1,6 +1,7 @@
 package analysis
 
 import (
+	"context"
 	"math"
 	"path/filepath"
 	"slices"
@@ -232,6 +233,16 @@ var candidateNodeKinds = []graph.NodeKind{
 // excluding entry points, test functions, exported symbols, and user-excluded patterns.
 // By default, variables are excluded (see FindDeadCodeOptions for rationale).
 func FindDeadCode(g graph.Reader, processes *ProcessResult, excludePatterns []string, opts ...FindDeadCodeOptions) []DeadCodeEntry {
+	entries, _ := FindDeadCodeContext(context.Background(), g, processes, excludePatterns, opts...)
+	return entries
+}
+
+// FindDeadCodeContext checks cancellation between graph operations and while
+// processing candidates. Individual legacy Reader calls may not be cancellable.
+func FindDeadCodeContext(ctx context.Context, g graph.Reader, processes *ProcessResult, excludePatterns []string, opts ...FindDeadCodeOptions) ([]DeadCodeEntry, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	var opt FindDeadCodeOptions
 	if len(opts) > 0 {
 		opt = opts[0]
@@ -245,6 +256,9 @@ func FindDeadCode(g graph.Reader, processes *ProcessResult, excludePatterns []st
 	// from one join; the fallback walks NodesByKind + EdgesByKind
 	// just like before.
 	ifaceRequiredMethods := buildIfaceRequiredMethods(g)
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 
 	// Pick the candidate-set source. When the backend implements
 	// DeadCodeCandidator, the "no incoming usage edge" filter runs
@@ -254,11 +268,17 @@ func FindDeadCode(g graph.Reader, processes *ProcessResult, excludePatterns []st
 	// the legacy AllNodes + GetInEdgesByNodeIDs fallback runs,
 	// identical to the pre-capability path.
 	candidates, incomingByID := collectDeadCodeCandidates(g, opt)
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 
 	// Build set of entry point node IDs from processes
 	entryPoints := make(map[string]bool)
 	if processes != nil {
 		for _, proc := range processes.Processes {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
 			entryPoints[proc.EntryPoint] = true
 			// Also consider all nodes that participate in any process
 			for _, step := range proc.Steps {
@@ -274,6 +294,9 @@ func FindDeadCode(g graph.Reader, processes *ProcessResult, excludePatterns []st
 	// materialise AllNodes() just to find the entry-point files.
 	entryPointFiles := make(map[string]bool)
 	for n := range g.NodesByKind(graph.KindFile) {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		if n != nil && isEntryPointNode(n) {
 			entryPointFiles[n.FilePath] = true
 		}
@@ -282,6 +305,9 @@ func FindDeadCode(g graph.Reader, processes *ProcessResult, excludePatterns []st
 	var result []DeadCodeEntry
 	var resultNodes []*graph.Node
 	for _, n := range candidates {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		// Skip kinds the analyzer never reports — structural,
 		// extracted metadata, infra, function-shape, and value-only
 		// nodes. See neverDeadCodeKinds for the full list and why.
@@ -488,6 +514,9 @@ func FindDeadCode(g graph.Reader, processes *ProcessResult, excludePatterns []st
 	placeholderSeen := make(map[string]struct{})
 	placeholderIDs := make([]string, 0, len(resultNodes)*4)
 	for _, n := range resultNodes {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		if n.Kind != graph.KindFunction && n.Kind != graph.KindMethod {
 			continue
 		}
@@ -516,6 +545,9 @@ func FindDeadCode(g graph.Reader, processes *ProcessResult, excludePatterns []st
 
 	filtered := result[:0]
 	for i, entry := range result {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		n := resultNodes[i]
 		incomplete := false
 		if n.Kind == graph.KindFunction || n.Kind == graph.KindMethod {
@@ -540,7 +572,10 @@ func FindDeadCode(g graph.Reader, processes *ProcessResult, excludePatterns []st
 		return result[i].Line < result[j].Line
 	})
 
-	return result
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return result, nil
 }
 
 // collectDeadCodeCandidates is the candidate-set splitter for

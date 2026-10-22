@@ -420,6 +420,9 @@ CREATE TABLE IF NOT EXISTS analysis_processes (
     PRIMARY KEY (generation_id, process_id)
 ) WITHOUT ROWID;
 
+CREATE INDEX IF NOT EXISTS analysis_processes_by_entry_point
+    ON analysis_processes(generation_id, entry_point);
+
 CREATE TABLE IF NOT EXISTS analysis_process_files (
     generation_id INTEGER NOT NULL,
     process_id    TEXT NOT NULL,
