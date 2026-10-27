@@ -155,6 +155,81 @@ func TestCheckoutLifecycleStartupSweepRetiresAbandonedBuildingGeneration(t *test
 	requireGenerationRetired(t, fixture.store, generationID)
 }
 
+// A daemon defers the boot drain past warmup: Seed only lists the residue, and
+// SweepBootResidue retires it later with the same in-use checks, so a
+// generation that is leased again by then is refused, not removed.
+func TestCheckoutLifecycleDeferredBootSweepRetiresResidueAfterSeed(t *testing.T) {
+	fixture := newSparseBuildFlightFixture(t)
+	ctx := context.Background()
+	started := time.Now()
+	request := fixture.request
+	request.Identity.CreatedAt = started.Add(-time.Hour).Unix()
+	wantErr := errors.New("leave populated generation for crash fixture")
+	request.PrePublish = func(context.Context, int64) error { return wantErr }
+
+	generationID, _, err := fixture.builder.Build(ctx, request)
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("fixture build error = %v, want %v", err, wantErr)
+	}
+	if err := fixture.store.Catalog().SetViewGenerationState(
+		ctx,
+		generationID,
+		store_sqlite.ViewGenerationBuilding,
+		store_sqlite.ViewGenerationFailed,
+	); err != nil {
+		t.Fatalf("restore crash-left building state: %v", err)
+	}
+
+	lifecycle := newGenerationRetirementLifecycle(fixture.store, started)
+	lifecycle.DeferBootSweep()
+	if err := lifecycle.Seed(ctx); err != nil {
+		t.Fatalf("seed lifecycle with crash-left generation: %v", err)
+	}
+	requireGenerationStateWithPayload(t, fixture.store, generationID, store_sqlite.ViewGenerationBuilding)
+
+	lease := lifecycle.leases.Acquire(generationID)
+	if retired := lifecycle.SweepBootResidue(ctx); retired != 0 {
+		t.Fatalf("deferred sweep retired %d generations under a live lease, want 0", retired)
+	}
+	requireGenerationStateWithPayload(t, fixture.store, generationID, store_sqlite.ViewGenerationBuilding)
+	lease.Release()
+
+	// The refused residue is not lost: the regular sweep re-derives it from
+	// the catalog.
+	if retired := lifecycle.sweepRetirements(ctx); retired != 1 {
+		t.Fatalf("regular sweep retired %d generations after the lease drained, want 1", retired)
+	}
+	requireGenerationRetired(t, fixture.store, generationID)
+	if retired := lifecycle.SweepBootResidue(ctx); retired != 0 {
+		t.Fatalf("a second boot-residue sweep retired %d generations, want 0", retired)
+	}
+}
+
+func TestCheckoutLifecycleDeferredBootSweepRetiresListedResidue(t *testing.T) {
+	fixture := newSparseBuildFlightFixture(t)
+	ctx := context.Background()
+	started := time.Now()
+	request := fixture.request
+	request.Identity.CreatedAt = started.Add(-time.Hour).Unix()
+	wantErr := errors.New("reject sparse publish")
+	request.PrePublish = func(context.Context, int64) error { return wantErr }
+
+	generationID, _, err := fixture.builder.Build(ctx, request)
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("failed sparse build error = %v, want %v", err, wantErr)
+	}
+	lifecycle := newGenerationRetirementLifecycle(fixture.store, started)
+	lifecycle.DeferBootSweep()
+	if err := lifecycle.Seed(ctx); err != nil {
+		t.Fatalf("seed lifecycle: %v", err)
+	}
+	requireGenerationStateWithPayload(t, fixture.store, generationID, store_sqlite.ViewGenerationFailed)
+	if retired := lifecycle.SweepBootResidue(ctx); retired != 1 {
+		t.Fatalf("deferred boot sweep retired %d generations, want 1", retired)
+	}
+	requireGenerationRetired(t, fixture.store, generationID)
+}
+
 func TestCheckoutLifecycleRetirementRetriesAfterActiveBuildFlight(t *testing.T) {
 	fixture := newSparseBuildFlightFixture(t)
 	ctx := context.Background()

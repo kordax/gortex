@@ -536,6 +536,13 @@ func runDaemonStart(cmd *cobra.Command, _ []string) error {
 		state.multiIndexer, state.lifecycle, reconcileInterval(), logger)
 	defer stopJanitor()
 
+	// Seed lists the previous process's view-generation residue but retires
+	// it only after warmup: deleting it through the shared graph indexes took
+	// minutes of page writes that readiness used to wait behind.
+	bootSweepCtx, cancelBootSweep := context.WithCancel(context.Background())
+	defer cancelBootSweep()
+	state.lifecycle.DeferBootSweep()
+
 	if err := srv.Listen(); err != nil {
 		startupReporter.Fail(err)
 		return err
@@ -647,6 +654,17 @@ func runDaemonStart(cmd *cobra.Command, _ []string) error {
 		// every reconcile and derived pass, so it observes the state the
 		// daemon will actually serve rather than a mid-warmup transient.
 		logRepoOwnershipAudit(state.graph, logger)
+		if state.lifecycle != nil {
+			go func() {
+				runtimeactivity.Begin("boot_residue_sweep")
+				defer runtimeactivity.End("boot_residue_sweep")
+				started := time.Now()
+				if retired := state.lifecycle.SweepBootResidue(bootSweepCtx); retired > 0 {
+					logger.Info("daemon: retired previous-process view generations",
+						zap.Int("generations", retired), zap.Duration("elapsed", time.Since(started)))
+				}
+			}()
+		}
 		// Carry stored note / memory symbol anchors onto prefixed node ids.
 		// Also here, and for the same reason: the rewrite decides by asking
 		// the graph which ids resolve, so it needs the settled graph. Marked

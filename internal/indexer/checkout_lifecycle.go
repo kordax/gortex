@@ -204,6 +204,11 @@ type CheckoutLifecycle struct {
 	// and the two slots of a checkout whose route is being withdrawn. The
 	// sweep retries them until the catalog stops refusing.
 	owed map[int64]struct{}
+	// deferBootSweep makes Seed list the prior process's residue instead of
+	// retiring it inline; bootResidue holds that list until SweepBootResidue.
+	// Both are guarded by coordMu.
+	deferBootSweep bool
+	bootResidue    []int64
 
 	// admitMu guards initialInventoryTaken alone. It is separate from coordMu
 	// because the admission predicate reads this map and then asks coordMu
@@ -2253,12 +2258,71 @@ func (l *CheckoutLifecycle) sweepRetirements(ctx context.Context) int {
 		return retired
 	}
 	owed = append(owed, l.orphanedGenerations(ctx, served, owed)...)
-	retireNewestFirst(owed)
+	return retired + l.retireOwed(ctx, owed)
+}
 
+// DeferBootSweep moves Seed's retirement of the prior process's residue off the
+// boot path. Every retired generation deletes its payload through the shared
+// graph indexes, and on a long-running installation that residue (superseded
+// layers and every unrouted commit cache) took Seed minutes of page writes
+// while warmup waited behind it. Call it before Seed; the daemon then calls
+// SweepBootResidue once warmup has finished.
+func (l *CheckoutLifecycle) DeferBootSweep() {
+	if l == nil {
+		return
+	}
+	l.coordMu.Lock()
+	l.deferBootSweep = true
+	l.coordMu.Unlock()
+}
+
+// bootSweep is Seed's residue drain. Deferred, it lists exactly what the inline
+// sweep would retire (no coordinator is running yet, so none claims a
+// checkout) and leaves the deletes to SweepBootResidue.
+func (l *CheckoutLifecycle) bootSweep(ctx context.Context) {
+	l.coordMu.Lock()
+	deferred := l.deferBootSweep
+	l.coordMu.Unlock()
+	if !deferred || l.store == nil {
+		l.sweepRetirements(ctx)
+		return
+	}
+	residue := l.orphanedGenerations(ctx, map[string]struct{}{}, nil)
+	l.coordMu.Lock()
+	l.bootResidue = append(l.bootResidue, residue...)
+	l.coordMu.Unlock()
+}
+
+// SweepBootResidue retires the residue a deferred Seed listed and reports how
+// many generations went. A second call has nothing left to do.
+func (l *CheckoutLifecycle) SweepBootResidue(ctx context.Context) int {
+	if l == nil || l.store == nil {
+		return 0
+	}
+	l.coordMu.Lock()
+	residue := l.bootResidue
+	l.bootResidue = nil
+	l.coordMu.Unlock()
+	if len(residue) == 0 {
+		return 0
+	}
+	return l.retireOwed(ctx, residue)
+}
+
+// retireOwed retires each generation, newest first, and forgets the ones that
+// are gone. RetirePayloadGeneration re-checks every one at retirement time, so
+// a generation that became routed, based-upon, leased or rebuilt since it was
+// listed is refused rather than removed.
+func (l *CheckoutLifecycle) retireOwed(ctx context.Context, owed []int64) int {
+	retireNewestFirst(owed)
 	inUse := func(generationID int64) bool {
 		return l.leases.InUse(generationID) || l.store.PayloadBuildFlightActive(generationID)
 	}
+	retired := 0
 	for _, generationID := range owed {
+		if ctx.Err() != nil {
+			break
+		}
 		err := l.store.RetirePayloadGeneration(ctx, generationID, inUse)
 		if err != nil && !errors.Is(err, store_sqlite.ErrCatalogNotFound) {
 			continue
@@ -2537,7 +2601,7 @@ func (l *CheckoutLifecycle) Seed(ctx context.Context) error {
 		return nil
 	}
 	if l.rec == nil {
-		l.sweepRetirements(ctx)
+		l.bootSweep(ctx)
 		return nil
 	}
 	var errs []error
@@ -2551,8 +2615,10 @@ func (l *CheckoutLifecycle) Seed(ctx context.Context) error {
 	}
 	// A crash can leave a populated generation in building state before any
 	// cleanup journal exists. Drain prior-process residue during boot instead
-	// of leaving it for the hourly janitor.
-	l.sweepRetirements(ctx)
+	// of leaving it for the hourly janitor. A daemon defers the retiring itself
+	// past warmup (DeferBootSweep); the residue is still listed here, before
+	// any coordinator starts and claims its checkout.
+	l.bootSweep(ctx)
 
 	seeded := map[string]string{}
 	if l.cfgMgr != nil {
