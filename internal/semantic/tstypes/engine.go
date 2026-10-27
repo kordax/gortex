@@ -392,19 +392,50 @@ func (a *applier) loadAdjacency(ids []string) {
 	if len(outMissing) > 0 {
 		loaded := a.g.GetOutEdgesByNodeIDs(outMissing)
 		for _, id := range outMissing {
-			a.outByID[id] = loaded[id]
+			edges := a.applicableEdges(loaded[id])
+			a.outByID[id] = edges
 			a.outLoaded[id] = true
-			a.hot.putOut(id, loaded[id])
+			a.hot.putOut(id, edges)
 		}
 	}
 	if len(inMissing) > 0 {
 		loaded := a.g.GetInEdgesByNodeIDs(inMissing)
 		for _, id := range inMissing {
-			a.inByID[id] = loaded[id]
+			edges := a.applicableEdges(loaded[id])
+			a.inByID[id] = edges
 			a.inLoaded[id] = true
-			a.hot.putIn(id, loaded[id])
+			a.hot.putIn(id, edges)
 		}
 	}
+}
+
+// applicableEdges keeps, in store order, only the edge kinds an apply phase
+// reads: calls it confirms or rebinds, member_of and param_of it walks for
+// ownership and arity, and the spec's inheritance kinds. Data-flow, reference
+// and structural edges are most of a repository's adjacency and no phase looks
+// at them, so retaining them for the whole pass only multiplied its heap.
+func (a *applier) applicableEdges(edges []*graph.Edge) []*graph.Edge {
+	if len(edges) == 0 {
+		return edges
+	}
+	kept := edges[:0:0]
+	for _, edge := range edges {
+		if edge != nil && a.appliesToEdgeKind(edge.Kind) {
+			kept = append(kept, edge)
+		}
+	}
+	if len(kept) == len(edges) {
+		return edges
+	}
+	return kept
+}
+
+func (a *applier) appliesToEdgeKind(kind graph.EdgeKind) bool {
+	switch kind {
+	case graph.EdgeCalls, graph.EdgeMemberOf, graph.EdgeParamOf, graph.EdgeExtends, graph.EdgeImplements:
+		return true
+	}
+	return a.spec != nil && edgeKindIn(kind, a.spec.inheritEdgeKinds())
 }
 
 func (a *applier) relevantEndpointIDs(ids []string, inheritKinds []graph.EdgeKind) []string {
