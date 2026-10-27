@@ -65,8 +65,34 @@ const (
 	// defaultCheckoutPollInterval is how often a coordinator signals itself.
 	// It is the only signal source an automatic checkout has today (see
 	// CheckoutCoordinatorConfig.PollInterval), so it bounds how stale a
-	// worktree's view can be.
+	// worktree's view can be while the checkout is in use.
 	defaultCheckoutPollInterval = 15 * time.Second
+
+	// checkoutIdlePollAfter and checkoutIdlePollMax shape the self-poll of a
+	// checkout nobody uses. Every poll forks `git status` over the whole
+	// working tree, and a machine full of agent and tool worktrees pays that
+	// for each of them forever. Once a checkout has gone this long without a
+	// selection, an explicit signal or a cycle that found it moved, each
+	// further idle period doubles the interval up to the cap. A selection
+	// wakes a backed-off loop at once, so a returning agent waits a quiet
+	// window, not the cap.
+	checkoutIdlePollAfter = 10 * time.Minute
+	checkoutIdlePollMax   = 5 * time.Minute
+
+	// checkoutDirtyBuildQuiet and checkoutDirtyBuildMaxDefer coalesce the
+	// working-tree builds a poll would start while someone is still editing.
+	// A dirty build re-derives every changed file and its closure into a new
+	// generation, which costs tens of seconds and gigabytes of page writes on a
+	// large repository, and on the working daemon 42% of builds were followed
+	// by another within two minutes. A poll that finds only the working tree
+	// moved waits until it has held still this long, but never defers past the
+	// cap, which keeps the view's worst staleness during continuous editing
+	// close to the former poll-plus-build latency. Explicit demand (a refresh
+	// ticket, a source mutation) is never deferred.
+	// One base poll interval: a lone edit costs one extra poll of latency,
+	// while saves closer together than a poll still coalesce.
+	checkoutDirtyBuildQuiet    = 15 * time.Second
+	checkoutDirtyBuildMaxDefer = 90 * time.Second
 
 	// defaultRetainedCommitLayers bounds how many commit generations one
 	// coordinator keeps for re-routing. Each retained generation costs the
@@ -163,7 +189,9 @@ type CheckoutCoordinatorConfig struct {
 	// Debounce is the quiet window; <= 0 takes defaultCheckoutQuietWindow.
 	Debounce time.Duration
 	// PollInterval is how often the coordinator signals itself; < 0 disables
-	// the self-signal and 0 takes defaultCheckoutPollInterval. Missing roots are
+	// the self-signal and 0 takes defaultCheckoutPollInterval. An idle checkout
+	// backs off from it (see checkoutIdlePollAfter); a selection or any other
+	// signal restores it. Missing roots are
 	// probed with exponential backoff up to five minutes (or PollInterval if
 	// longer); lifecycle reconciliation owns retirement.
 	PollInterval time.Duration
@@ -283,6 +311,20 @@ type CheckoutCoordinator struct {
 	// dirtyFingerprint is the working tree the last cycle sampled. It is what
 	// the checkout's text searcher is keyed by — see checkout_text_search.go.
 	dirtyFingerprint string
+	// lastActivity is the last selection, explicit signal or cycle that found
+	// the checkout moved; idle polls back off from it. pollBackedOff says the
+	// loop's next self-poll is further out than poll, and wakePending says a
+	// selection already asked a backed-off loop to sample early, so repeated
+	// selections cannot keep re-arming the quiet window.
+	lastActivity  time.Time
+	pollBackedOff bool
+	wakePending   bool
+	// dirtyPending is the working-tree fingerprint a poll deferred building,
+	// dirtyPendingSince when the tree last changed to it, and
+	// dirtyDeferredSince when the current run of deferrals began.
+	dirtyPending       string
+	dirtyPendingSince  time.Time
+	dirtyDeferredSince time.Time
 
 	// textMu guards the checkout's own trigram searcher and is held across the
 	// build, so concurrent searches on one checkout pay for one index.
@@ -315,6 +357,11 @@ func (c *CheckoutCoordinator) selectionRequests() chan struct{} {
 // PrioritizeSelection promotes queued work without cancelling an active build
 // or resetting the quiet window. A repeated request contributes at most one
 // buffered demand token; it does not schedule another reconcile cycle.
+//
+// A selection is also demand: it keeps the self-poll at its base interval, and
+// the first selection of a backed-off checkout signals one early cycle so the
+// view catches up with the disk instead of waiting out the idle interval.
+// Later selections leave that pending wake alone until the cycle runs.
 func (c *CheckoutCoordinator) PrioritizeSelection() {
 	if c == nil {
 		return
@@ -323,6 +370,85 @@ func (c *CheckoutCoordinator) PrioritizeSelection() {
 	case c.selectionRequests() <- struct{}{}:
 	default:
 	}
+	c.mu.Lock()
+	c.lastActivity = time.Now()
+	// A deferred working-tree build is deliberately not woken here: an agent
+	// that queries between its own edits would otherwise rebuild after every
+	// edit. A caller that needs the disk asks with a refresh ticket.
+	wake := c.pollBackedOff && !c.wakePending
+	if wake {
+		c.wakePending = true
+	}
+	c.mu.Unlock()
+	if wake {
+		c.Signal("selected while idle")
+	}
+}
+
+// deferDirtyBuild reports whether a poll that found only the working tree
+// moved, to fingerprint, should leave the routed dirty layer in place for now:
+// the tree changed less than checkoutDirtyBuildQuiet ago and the deferral run
+// is younger than checkoutDirtyBuildMaxDefer.
+func (c *CheckoutCoordinator) deferDirtyBuild(fingerprint string, now time.Time) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.dirtyPending == "" {
+		c.dirtyDeferredSince = now
+	}
+	if fingerprint != c.dirtyPending {
+		c.dirtyPending = fingerprint
+		c.dirtyPendingSince = now
+		// Someone is working in this tree: keep the poll at its base
+		// interval so the quiet window is observed, not a backed-off one.
+		c.lastActivity = now
+	}
+	if now.Sub(c.dirtyDeferredSince) >= checkoutDirtyBuildMaxDefer {
+		return false
+	}
+	return now.Sub(c.dirtyPendingSince) < checkoutDirtyBuildQuiet
+}
+
+// clearDirtyDeferral forgets a deferred working-tree change once the routed
+// layer matches the tree again or a cycle goes on to build it.
+func (c *CheckoutCoordinator) clearDirtyDeferral() {
+	c.mu.Lock()
+	c.dirtyPending = ""
+	c.mu.Unlock()
+}
+
+// idlePollDelay is the self-poll interval for a checkout that has been idle
+// for idle: base until checkoutIdlePollAfter, then doubled for each further
+// idle period up to checkoutIdlePollMax. A base at or above the cap, or a
+// disabled poll, is returned unchanged.
+func idlePollDelay(base, idle time.Duration) time.Duration {
+	if base <= 0 || base >= checkoutIdlePollMax || idle < checkoutIdlePollAfter {
+		return base
+	}
+	delay := base
+	for steps := idle / checkoutIdlePollAfter; steps > 0 && delay < checkoutIdlePollMax; steps-- {
+		delay *= 2
+	}
+	return min(delay, checkoutIdlePollMax)
+}
+
+// nextPollDelay is the interval to the next self-poll of a present root, and
+// records whether it is backed off for PrioritizeSelection.
+func (c *CheckoutCoordinator) nextPollDelay(now time.Time) time.Duration {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.lastActivity.IsZero() {
+		c.lastActivity = now
+	}
+	delay := idlePollDelay(c.poll, now.Sub(c.lastActivity))
+	c.pollBackedOff = delay > c.poll
+	return delay
+}
+
+// noteActivity restarts the idle clock.
+func (c *CheckoutCoordinator) noteActivity() {
+	c.mu.Lock()
+	c.lastActivity = time.Now()
+	c.mu.Unlock()
 }
 
 // retainedCommitLayer is one commit generation kept for re-routing, keyed by
@@ -423,12 +549,19 @@ func (c *CheckoutCoordinator) Signal(reason string) {
 	}
 	c.mu.Lock()
 	c.reason = reason
+	if reason != checkoutPollReason {
+		c.lastActivity = time.Now()
+	}
 	c.mu.Unlock()
 	select {
 	case c.signal <- struct{}{}:
 	default:
 	}
 }
+
+// checkoutPollReason is the reason the loop's own self-poll signals with. It is
+// the one signal that is not demand, so it never restarts the idle clock.
+const checkoutPollReason = "poll"
 
 // Close stops the loop and waits for cooperative cancellation to finish.
 func (c *CheckoutCoordinator) Close() error {
@@ -541,8 +674,8 @@ func (c *CheckoutCoordinator) run() {
 					pollDelay *= 2
 				}
 			} else {
-				pollDelay = c.poll
-				c.Signal("poll")
+				pollDelay = c.nextPollDelay(time.Now())
+				c.Signal(checkoutPollReason)
 			}
 			pollTimer.Reset(pollDelay)
 		case <-armed:
@@ -553,6 +686,8 @@ func (c *CheckoutCoordinator) run() {
 				continue
 			}
 			c.cycle(lifetime)
+			pollDelay = c.rearmPoll(pollTimer, pollDelay)
+			c.endSelectionWake()
 		case <-admitted:
 			admitted = nil
 			if !claimed {
@@ -560,6 +695,8 @@ func (c *CheckoutCoordinator) run() {
 			}
 			claimed = false
 			c.cycle(lifetime)
+			pollDelay = c.rearmPoll(pollTimer, pollDelay)
+			c.endSelectionWake()
 		}
 	}
 }
@@ -588,6 +725,32 @@ func (c *CheckoutCoordinator) deferCycle() {
 	}
 }
 
+// endSelectionWake lets the next selection wake the loop again. It runs only
+// after the cycle and rearmPoll, so pollBackedOff already describes the new
+// schedule; clearing it earlier let a selection landing mid-cycle see the
+// stale backed-off state and wake a second, redundant cycle.
+func (c *CheckoutCoordinator) endSelectionWake() {
+	c.mu.Lock()
+	c.wakePending = false
+	c.mu.Unlock()
+}
+
+// rearmPoll pulls a backed-off self-poll back in after a cycle that left the
+// checkout active again. A poll already due sooner is left alone. It returns
+// the interval the poll timer is now armed for.
+func (c *CheckoutCoordinator) rearmPoll(timer *time.Timer, current time.Duration) time.Duration {
+	if timer == nil {
+		return current
+	}
+	next := c.nextPollDelay(time.Now())
+	if next >= current {
+		return current
+	}
+	stopTimer(timer)
+	timer.Reset(next)
+	return next
+}
+
 // stopTimer stops a timer and drains a callback that already fired, so a
 // following Reset arms a window that is empty.
 func stopTimer(t *time.Timer) {
@@ -610,7 +773,12 @@ func (c *CheckoutCoordinator) cycle(ctx context.Context) {
 	reason := c.reason
 	c.mu.Unlock()
 
-	preflight := c.settledWithoutBuild
+	// Only the loop's own poll may defer a working-tree build. A refresh
+	// ticket or a mutation is someone waiting for the disk.
+	mayDefer := reason == checkoutPollReason && through == 0
+	preflight := func(ctx context.Context) (CheckoutCycle, bool) {
+		return c.settledWithoutBuild(ctx, mayDefer)
+	}
 	if c.cyclePreflight != nil {
 		preflight = c.cyclePreflight
 	}
@@ -668,6 +836,12 @@ func (c *CheckoutCoordinator) cycle(ctx context.Context) {
 	}
 	out := c.reconcile(ctx)
 	recordCoordinatorCycle(out)
+	if out.CommitBuilt || out.DirtyBuilt || out.CommitReused || out.Rescheduled {
+		c.noteActivity()
+	}
+	if out.DirtyBuilt {
+		c.clearDirtyDeferral()
+	}
 	switch {
 	case out.Err != nil && !errors.Is(out.Err, context.Canceled):
 		c.logger.Warn("checkout coordinator: reconcile failed",
@@ -686,7 +860,11 @@ func (c *CheckoutCoordinator) cycle(ctx context.Context) {
 // settledWithoutBuild recognizes the overwhelmingly common poll result before
 // it queues for the one build lane. It performs the same identity and dirty
 // fingerprint checks as reconcile, but makes no catalog route change.
-func (c *CheckoutCoordinator) settledWithoutBuild(ctx context.Context) (CheckoutCycle, bool) {
+//
+// mayDefer lets a poll-driven cycle keep a routed working-tree layer that is
+// one edit behind the disk while the edits are still coming; see
+// deferDirtyBuild.
+func (c *CheckoutCoordinator) settledWithoutBuild(ctx context.Context, mayDefer bool) (CheckoutCycle, bool) {
 	var out CheckoutCycle
 	if err := ctx.Err(); err != nil {
 		return out, false
@@ -711,8 +889,15 @@ func (c *CheckoutCoordinator) settledWithoutBuild(ctx context.Context) (Checkout
 	}
 	dirty, found, err := c.catalog.GetViewGeneration(ctx, route.DirtyGenerationID)
 	if err != nil || !found || !servableGeneration(dirty.State) ||
-		dirty.BaseGenerationID != commit.GenerationID || dirty.LowerViewFingerprint != sample.Fingerprint {
+		dirty.BaseGenerationID != commit.GenerationID {
 		return out, false
+	}
+	if dirty.LowerViewFingerprint != sample.Fingerprint {
+		if !mayDefer || !c.deferDirtyBuild(sample.Fingerprint, time.Now()) {
+			return out, false
+		}
+	} else {
+		c.clearDirtyDeferral()
 	}
 
 	c.noteDirtyFingerprint(sample.Fingerprint)
