@@ -4,8 +4,9 @@ This fork has independent versions and updates at [kordax/gortex](https://github
 
 `gortex version` identifies the binary with `fork by kordax`, the fork repository, version and commit. Check `command -v gortex` too: an older installation earlier in `PATH` can still win. A running daemon keeps its previous executable until explicitly restarted.
 
-## Current release: v1.3.1
+## Current release: v1.3.2
 
+- Retire the previous process's worktree layers after warmup instead of before it; that cleanup had grown the pause before warmup to minutes.
 - Keep natural-language search and other analysis readers off the whole-graph analysis lock, which made them wait until the 59 s tool deadline.
 - Back off polling of idle automatic worktrees, up to five minutes; a selection wakes them at once.
 - Coalesce working-tree layer rebuilds while a worktree is being edited.
@@ -21,9 +22,9 @@ sh scripts/install.sh
 gortex version
 ```
 
-The installer resolves the latest fork tag and verifies SHA-256. If cosign is installed, it also requires workflow signatures and refuses unsigned manual releases. Keep verification enabled; use the trusted-binary procedure below for an explicitly trusted manual build, substituting `v1.3.1` for `v1.0.0`.
+The installer resolves the latest fork tag and verifies SHA-256. If cosign is installed, it also requires workflow signatures and refuses unsigned manual releases. Keep verification enabled; use the trusted-binary procedure below for an explicitly trusted manual build, substituting `v1.3.2` for `v1.0.0`.
 
-For Debian or Ubuntu, download `gortex_linux_amd64.deb` from [v1.3.1](https://github.com/kordax/gortex/releases/tag/v1.3.1), verify it against `checksums.txt`, then install:
+For Debian or Ubuntu, download `gortex_linux_amd64.deb` from [v1.3.2](https://github.com/kordax/gortex/releases/tag/v1.3.2), verify it against `checksums.txt`, then install:
 
 ```sh
 sudo apt install ./gortex_linux_amd64.deb
