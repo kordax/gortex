@@ -248,6 +248,10 @@ type Server struct {
 	backgroundMaintenanceDrained bool
 	analysisMaterializeMu        sync.Mutex
 	analysisMu                   sync.RWMutex
+	// analysisRecomputes counts whole-graph computations holding or awaiting
+	// analysisMu for writing; request readers skip the lock while it is
+	// non-zero. See beginAnalysisRecompute.
+	analysisRecomputes atomic.Int32
 
 	// cochange caches the git-history co-change graph. cochangeByFile
 	// maps a file path to its co-changing file paths and association
@@ -2870,9 +2874,11 @@ func (s *Server) RunAnalysis() {
 		scheduleOSMemoryReleaseAfterBurst(s.logger, "mcp_analysis")
 	}()
 
+	recomputed := s.beginAnalysisRecompute()
 	s.analysisMu.Lock()
 	analysisMetrics := s.populateAnalysisLocked()
 	s.analysisMu.Unlock()
+	recomputed()
 
 	// The graph was just rebuilt, so the lazy-enrichment ledger — symbol
 	// IDs whose incoming refs were confirmed against the *previous* graph
@@ -2987,7 +2993,9 @@ func (s *Server) analysisSnapshotCurrentLocked() bool {
 
 func (s *Server) getCommunities() *analysis.CommunityResult {
 	_ = s.ensureCommunitiesMaterialized()
-	s.analysisMu.RLock()
+	if !s.rlockAnalysisForRequest() {
+		return nil
+	}
 	defer s.analysisMu.RUnlock()
 	if !s.analysisSnapshotCurrentLocked() {
 		return nil
@@ -3014,6 +3022,10 @@ func (s *Server) getCommunities() *analysis.CommunityResult {
 func (s *Server) incrementalCommunities() (*analysis.CommunityResult, analysis.IncrementalCommunityStats) {
 	_ = s.ensureCommunitiesMaterialized()
 	_ = s.ensureLeidenMaterialized()
+	// A miss below runs Leiden under the write lock; readers must not queue
+	// behind it any more than behind RunAnalysis.
+	recomputed := s.beginAnalysisRecompute()
+	defer recomputed()
 	s.analysisMu.Lock()
 	defer s.analysisMu.Unlock()
 	cur := s.currentCommunityToken()
@@ -3068,7 +3080,9 @@ func (s *Server) incrementalCommunities() (*analysis.CommunityResult, analysis.I
 
 func (s *Server) getProcesses() *analysis.ProcessResult {
 	_ = s.ensureProcessesMaterialized()
-	s.analysisMu.RLock()
+	if !s.rlockAnalysisForRequest() {
+		return nil
+	}
 	defer s.analysisMu.RUnlock()
 	if !s.analysisSnapshotCurrentLocked() {
 		return nil
@@ -3078,7 +3092,9 @@ func (s *Server) getProcesses() *analysis.ProcessResult {
 
 func (s *Server) getPageRank() *analysis.PageRankResult {
 	_ = s.ensureNodeMetricsMaterialized()
-	s.analysisMu.RLock()
+	if !s.rlockAnalysisForRequest() {
+		return nil
+	}
 	defer s.analysisMu.RUnlock()
 	if !s.analysisSnapshotCurrentLocked() {
 		return nil
@@ -3092,7 +3108,9 @@ func (s *Server) getPageRank() *analysis.PageRankResult {
 // it after releasing the read lock.
 func (s *Server) getAdjacency() *analysis.AdjacencySnapshot {
 	_ = s.ensureAdjacencyMaterialized()
-	s.analysisMu.RLock()
+	if !s.rlockAnalysisForRequest() {
+		return nil
+	}
 	defer s.analysisMu.RUnlock()
 	if !s.analysisSnapshotCurrentLocked() {
 		return nil
@@ -3105,7 +3123,9 @@ func (s *Server) getAdjacency() *analysis.AdjacencySnapshot {
 // nil-check (AutoConcepts.Expand is itself nil-safe).
 func (s *Server) getAutoConcepts() *search.AutoConcepts {
 	_ = s.ensureAutoConceptsMaterialized()
-	s.analysisMu.RLock()
+	if !s.rlockAnalysisForRequest() {
+		return nil
+	}
 	defer s.analysisMu.RUnlock()
 	if !s.analysisSnapshotCurrentLocked() {
 		return nil
@@ -3118,7 +3138,9 @@ func (s *Server) getAutoConcepts() *search.AutoConcepts {
 // are themselves nil-safe).
 func (s *Server) getHITS() *analysis.HITSResult {
 	_ = s.ensureNodeMetricsMaterialized()
-	s.analysisMu.RLock()
+	if !s.rlockAnalysisForRequest() {
+		return nil
+	}
 	defer s.analysisMu.RUnlock()
 	if !s.analysisSnapshotCurrentLocked() {
 		return nil
@@ -3135,7 +3157,9 @@ func (s *Server) getHotspots() []analysis.HotspotEntry {
 	if !s.ensureCommunitiesMaterialized() && s.hotspotsFn == nil {
 		return nil
 	}
-	s.analysisMu.RLock()
+	if !s.rlockAnalysisForRequest() {
+		return nil
+	}
 	if !s.analysisSnapshotCurrentLocked() {
 		s.analysisMu.RUnlock()
 		return nil
@@ -3150,7 +3174,9 @@ func (s *Server) getHotspots() []analysis.HotspotEntry {
 	s.hotspotsBuildMu.Lock()
 	defer s.hotspotsBuildMu.Unlock()
 	for {
-		s.analysisMu.RLock()
+		if !s.rlockAnalysisForRequest() {
+			return nil
+		}
 		if !s.analysisSnapshotCurrentLocked() {
 			s.analysisMu.RUnlock()
 			return nil
@@ -3171,7 +3197,11 @@ func (s *Server) getHotspots() []analysis.HotspotEntry {
 		}
 		hotspots := build(s.graph, communities, 0)
 
-		s.analysisMu.Lock()
+		if !s.lockAnalysisForRequest() {
+			// A recompute started under the build: the communities it used
+			// are stale, the same verdict an epoch change reaches below.
+			return nil
+		}
 		if s.analysisEpoch == epoch && s.communitiesToken == token && s.analysisSnapshotCurrentLocked() {
 			s.hotspots = hotspots
 			s.hotspotsReady = true

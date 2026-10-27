@@ -659,10 +659,14 @@ func (s *Server) fillStepImpact(step *simulationStep, layer *graph.OverlayLayer,
 		seedIDs = append(seedIDs, ren["from"])
 	}
 	if len(seedIDs) > 0 {
-		s.analysisMu.RLock()
-		comms := s.communities
-		procs := s.processes
-		s.analysisMu.RUnlock()
+		var (
+			comms *analysis.CommunityResult
+			procs *analysis.ProcessResult
+		)
+		if s.rlockAnalysisForRequest() {
+			comms, procs = s.communities, s.processes
+			s.analysisMu.RUnlock()
+		}
 		impact := analysis.AnalyzeImpact(s.graph, seedIDs, comms, procs)
 		step.impact = map[string]any{
 			"risk":              string(impact.Risk),

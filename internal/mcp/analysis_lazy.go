@@ -172,7 +172,9 @@ func (s *Server) logAnalysisMaterializationError(component string, err error) {
 }
 
 func (s *Server) installMaterializedGeneration(header graph.AnalysisGenerationHeader, install func()) bool {
-	s.analysisMu.Lock()
+	if !s.lockAnalysisForRequest() {
+		return false
+	}
 	defer s.analysisMu.Unlock()
 	if !s.analysisGenerationReady || s.analysisGeneration.GenerationID != header.GenerationID ||
 		!s.analysisSnapshotCurrentLocked() {
@@ -183,7 +185,9 @@ func (s *Server) installMaterializedGeneration(header graph.AnalysisGenerationHe
 }
 
 func (s *Server) ensureNodeMetricsMaterialized() bool {
-	s.analysisMu.RLock()
+	if !s.rlockAnalysisForRequest() {
+		return false
+	}
 	ready := s.analysisSnapshotCurrentLocked() && s.pageRank != nil && s.hits != nil
 	s.analysisMu.RUnlock()
 	if ready {
@@ -192,7 +196,9 @@ func (s *Server) ensureNodeMetricsMaterialized() bool {
 
 	s.analysisMaterializeMu.Lock()
 	defer s.analysisMaterializeMu.Unlock()
-	s.analysisMu.RLock()
+	if !s.rlockAnalysisForRequest() {
+		return false
+	}
 	ready = s.analysisSnapshotCurrentLocked() && s.pageRank != nil && s.hits != nil
 	s.analysisMu.RUnlock()
 	if ready {
@@ -233,7 +239,9 @@ func (s *Server) ensureNodeMetricsMaterialized() bool {
 }
 
 func (s *Server) ensureCommunitiesMaterialized() bool {
-	s.analysisMu.RLock()
+	if !s.rlockAnalysisForRequest() {
+		return false
+	}
 	ready := s.analysisSnapshotCurrentLocked() && s.communities != nil
 	s.analysisMu.RUnlock()
 	if ready {
@@ -242,7 +250,9 @@ func (s *Server) ensureCommunitiesMaterialized() bool {
 
 	s.analysisMaterializeMu.Lock()
 	defer s.analysisMaterializeMu.Unlock()
-	s.analysisMu.RLock()
+	if !s.rlockAnalysisForRequest() {
+		return false
+	}
 	ready = s.analysisSnapshotCurrentLocked() && s.communities != nil
 	s.analysisMu.RUnlock()
 	if ready {
@@ -298,7 +308,9 @@ func (s *Server) ensureCommunitiesMaterialized() bool {
 }
 
 func (s *Server) ensureProcessesMaterialized() bool {
-	s.analysisMu.RLock()
+	if !s.rlockAnalysisForRequest() {
+		return false
+	}
 	ready := s.analysisSnapshotCurrentLocked() && s.processes != nil
 	s.analysisMu.RUnlock()
 	if ready {
@@ -307,7 +319,9 @@ func (s *Server) ensureProcessesMaterialized() bool {
 
 	s.analysisMaterializeMu.Lock()
 	defer s.analysisMaterializeMu.Unlock()
-	s.analysisMu.RLock()
+	if !s.rlockAnalysisForRequest() {
+		return false
+	}
 	ready = s.analysisSnapshotCurrentLocked() && s.processes != nil
 	s.analysisMu.RUnlock()
 	if ready {
@@ -364,7 +378,9 @@ func (s *Server) ensureProcessesMaterialized() bool {
 }
 
 func (s *Server) ensureAutoConceptsMaterialized() bool {
-	s.analysisMu.RLock()
+	if !s.rlockAnalysisForRequest() {
+		return false
+	}
 	ready := s.analysisSnapshotCurrentLocked() && s.autoConcepts != nil
 	s.analysisMu.RUnlock()
 	if ready {
@@ -373,7 +389,9 @@ func (s *Server) ensureAutoConceptsMaterialized() bool {
 
 	s.analysisMaterializeMu.Lock()
 	defer s.analysisMaterializeMu.Unlock()
-	s.analysisMu.RLock()
+	if !s.rlockAnalysisForRequest() {
+		return false
+	}
 	ready = s.analysisSnapshotCurrentLocked() && s.autoConcepts != nil
 	s.analysisMu.RUnlock()
 	if ready {
@@ -404,7 +422,9 @@ func (s *Server) ensureAutoConceptsMaterialized() bool {
 }
 
 func (s *Server) ensureAdjacencyMaterialized() bool {
-	s.analysisMu.RLock()
+	if !s.rlockAnalysisForRequest() {
+		return false
+	}
 	ready := s.analysisSnapshotCurrentLocked() && s.adjacency != nil
 	s.analysisMu.RUnlock()
 	if ready {
@@ -412,7 +432,9 @@ func (s *Server) ensureAdjacencyMaterialized() bool {
 	}
 	s.analysisMaterializeMu.Lock()
 	defer s.analysisMaterializeMu.Unlock()
-	s.analysisMu.RLock()
+	if !s.rlockAnalysisForRequest() {
+		return false
+	}
 	ready = s.analysisSnapshotCurrentLocked() && s.adjacency != nil
 	s.analysisMu.RUnlock()
 	if ready {
@@ -439,7 +461,9 @@ func (s *Server) ensureAdjacencyMaterialized() bool {
 }
 
 func (s *Server) ensureLeidenMaterialized() bool {
-	s.analysisMu.RLock()
+	if !s.rlockAnalysisForRequest() {
+		return false
+	}
 	ready := s.analysisSnapshotCurrentLocked() && s.leidenCache != nil
 	s.analysisMu.RUnlock()
 	if ready {
@@ -447,7 +471,9 @@ func (s *Server) ensureLeidenMaterialized() bool {
 	}
 	s.analysisMaterializeMu.Lock()
 	defer s.analysisMaterializeMu.Unlock()
-	s.analysisMu.RLock()
+	if !s.rlockAnalysisForRequest() {
+		return false
+	}
 	ready = s.analysisSnapshotCurrentLocked() && s.leidenCache != nil
 	s.analysisMu.RUnlock()
 	if ready {
