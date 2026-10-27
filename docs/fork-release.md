@@ -4,17 +4,14 @@ This fork has independent versions and updates at [kordax/gortex](https://github
 
 `gortex version` identifies the binary with `fork by kordax`, the fork repository, version and commit. Check `command -v gortex` too: an older installation earlier in `PATH` can still win. A running daemon keeps its previous executable until explicitly restarted.
 
-## Current release: v1.3.0
+## Current release: v1.3.1
 
-- Bound savings persistence and credit each file baseline once per session.
-- Preserve surviving incoming graph references during incremental publication.
-- Honor cancellation while generation cleanup waits for a SQLite write slot.
-- Avoid blocking dead-code requests on process materialization and add bounded reachability queries.
-- Start, capture and stop runtime profiles through the daemon control socket.
-- Profile isolated MCP workloads against a copied project subdirectory.
-- Require Go 1.27.3 for the patched standard library.
+- Keep natural-language search and other analysis readers off the whole-graph analysis lock, which made them wait until the 59 s tool deadline.
+- Back off polling of idle automatic worktrees, up to five minutes; a selection wakes them at once.
+- Coalesce working-tree layer rebuilds while a worktree is being edited.
+- Retain only the edge kinds Go type enrichment reads, lowering its peak memory.
 
-This manual release includes a locally built static Linux amd64 archive and Debian package. Other platforms, cosign signatures and SLSA attestations are not included. Local checks are required before publication; GitHub CI is not awaited for this maintainer-requested release. The historical analysis timeout has not been reproduced, and this release does not claim to eliminate every stall.
+This manual release includes a locally built static Linux amd64 archive and Debian package. Other platforms, cosign signatures and SLSA attestations are not included. Local checks are required before publication; GitHub CI is not awaited for this maintainer-requested release. A working-tree layer rebuild still writes gigabytes on a large repository; this release reduces how often it runs, not its cost.
 
 Install the latest published release into `~/.local/bin` from this checkout:
 
@@ -24,9 +21,9 @@ sh scripts/install.sh
 gortex version
 ```
 
-The installer resolves the latest fork tag and verifies SHA-256. If cosign is installed, it also requires workflow signatures and refuses unsigned manual releases. Keep verification enabled; use the trusted-binary procedure below for an explicitly trusted manual build, substituting `v1.3.0` for `v1.0.0`.
+The installer resolves the latest fork tag and verifies SHA-256. If cosign is installed, it also requires workflow signatures and refuses unsigned manual releases. Keep verification enabled; use the trusted-binary procedure below for an explicitly trusted manual build, substituting `v1.3.1` for `v1.0.0`.
 
-For Debian or Ubuntu, download `gortex_linux_amd64.deb` from [v1.3.0](https://github.com/kordax/gortex/releases/tag/v1.3.0), verify it against `checksums.txt`, then install:
+For Debian or Ubuntu, download `gortex_linux_amd64.deb` from [v1.3.1](https://github.com/kordax/gortex/releases/tag/v1.3.1), verify it against `checksums.txt`, then install:
 
 ```sh
 sudo apt install ./gortex_linux_amd64.deb
