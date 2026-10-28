@@ -145,3 +145,75 @@ func TestReadFileContentBudgetHonorsOptOut(t *testing.T) {
 	req.Params.Arguments = map[string]any{"max_bytes": 0}
 	assert.Zero(t, readFileContentBudget(req), "max_bytes:0 opts out")
 }
+
+// A giant symbol used to arrive whole (140 KB observed); it is now cut at
+// whole lines inside the budget, flagged, and continues through read_file.
+func TestGetSymbolSourceLargeSymbolStaysInBudget(t *testing.T) {
+	srv, dir := setupTestServer(t)
+	var b strings.Builder
+	b.WriteString("package big\n\nfunc Huge() int {\n\tx := 0\n")
+	for i := range 6000 {
+		fmt.Fprintf(&b, "\tx += %d // step %05d\n", i, i)
+	}
+	b.WriteString("\treturn x\n}\n")
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "huge.go"), []byte(b.String()), 0o644))
+	require.NoError(t, srv.indexer.IndexFile(filepath.Join(dir, "huge.go")))
+	var id string
+	for _, n := range srv.graph.AllNodes() {
+		if n.Name == "Huge" {
+			id = n.ID
+		}
+	}
+	require.NotEmpty(t, id)
+
+	m := extractTextResult(t, callTool(t, srv, "get_symbol_source", map[string]any{"id": id, "format": "json"}))
+	src, _ := m["source"].(string)
+	require.NotEmpty(t, src)
+	assert.LessOrEqual(t, len(src), readFileContentBudget(mcplib.CallToolRequest{}))
+	assert.Contains(t, src, "func Huge() int {", "the cut keeps the leading lines")
+	assert.True(t, strings.HasPrefix(b.String(), src), "with its context lines the cut is a prefix of the file")
+	assert.Equal(t, true, m["source_truncated"])
+	assert.Contains(t, m["source_lines"], "of 6006")
+
+	whole := extractTextResult(t, callTool(t, srv, "get_symbol_source", map[string]any{"id": id, "format": "json", "max_bytes": 0}))
+	all, _ := whole["source"].(string)
+	assert.Contains(t, all, "step 05999", "max_bytes:0 keeps the whole symbol")
+	assert.Nil(t, whole["source_truncated"])
+}
+
+// batch_symbols shares the budget across its symbols: a giant body is cut,
+// a small neighbour arrives whole.
+func TestBatchSymbolsSharesTheBudget(t *testing.T) {
+	srv, dir := setupTestServer(t)
+	var b strings.Builder
+	b.WriteString("package big\n\nfunc Small() int { return 1 }\n\nfunc Huge() int {\n\tx := 0\n")
+	for i := range 6000 {
+		fmt.Fprintf(&b, "\tx += %d // step %05d\n", i, i)
+	}
+	b.WriteString("\treturn x\n}\n")
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "huge.go"), []byte(b.String()), 0o644))
+	require.NoError(t, srv.indexer.IndexFile(filepath.Join(dir, "huge.go")))
+	ids := map[string]string{}
+	for _, n := range srv.graph.AllNodes() {
+		if n.Name == "Huge" || n.Name == "Small" {
+			ids[n.Name] = n.ID
+		}
+	}
+	require.Len(t, ids, 2)
+
+	m := extractTextResult(t, callTool(t, srv, "batch_symbols", map[string]any{
+		"ids": ids["Small"] + "," + ids["Huge"], "include_source": true, "format": "json",
+	}))
+	syms, _ := m["symbols"].([]any)
+	require.Len(t, syms, 2)
+	byName := map[string]map[string]any{}
+	for _, s := range syms {
+		e := s.(map[string]any)
+		byName[e["name"].(string)] = e
+	}
+	assert.Contains(t, byName["Small"]["source"], "return 1")
+	assert.Nil(t, byName["Small"]["source_truncated"])
+	huge, _ := byName["Huge"]["source"].(string)
+	assert.LessOrEqual(t, len(huge), readFileContentBudget(mcplib.CallToolRequest{})/2)
+	assert.Equal(t, true, byName["Huge"]["source_truncated"])
+}

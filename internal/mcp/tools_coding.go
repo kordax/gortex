@@ -1081,6 +1081,14 @@ func (s *Server) handleGetSymbolSource(ctx context.Context, req mcp.CallToolRequ
 		secretsRedacted = true
 	}
 
+	// A generated table or a giant function arrived whole (up to 140 KB) and
+	// the generic budget only trims lists. Without an explicit shape request,
+	// keep the leading whole lines that fit and say where to continue.
+	var budgetCut sourceCut
+	if !bodiesElided && !salienceTruncated {
+		source, budgetCut = cutSourceToBudget(source, startLine, readFileContentBudget(req))
+	}
+
 	// Server-side accounting only — the savings value isn't returned to
 	// the caller (agents don't act on it and it burns tokens in every
 	// response). Aggregated stats remain available via the `savings` tool.
@@ -1120,10 +1128,16 @@ func (s *Server) handleGetSymbolSource(ctx context.Context, req mcp.CallToolRequ
 	if secretsRedacted {
 		result["secrets_redacted"] = true
 	}
+	budgetCut.stamp(result)
 
 	// Omission notes: flag what the payload leaves out or reshapes so
 	// the model doesn't reason about absent code.
 	omissions := pathOmissions(node.FilePath)
+	if budgetCut.cut {
+		omissions = append(omissions, omission("windowed", fmt.Sprintf(
+			"returned lines %s to fit the response budget; continue with read_file offset=%d, pass max_lines or compress_bodies for a skeleton, or max_bytes:0 for the whole symbol",
+			budgetCut.lines(), budgetCut.next)))
+	}
 	if bodiesElided {
 		omissions = append(omissions, omission("compressed",
 			"function and method bodies replaced with elided stubs; signatures and structure kept"))
@@ -1307,6 +1321,12 @@ func (s *Server) handleBatchSymbols(ctx context.Context, req mcp.CallToolRequest
 		includeSource = v
 	}
 	contextLines := req.GetInt("context_lines", 3)
+	// The budget is shared across the requested symbols, so one giant body
+	// cannot crowd out the rest or push the whole batch past it.
+	perSymbolBudget := readFileContentBudget(req)
+	if perSymbolBudget > 0 {
+		perSymbolBudget = max(perSymbolBudget/len(ids), readFileContentReserve)
+	}
 	// Confine the caller/callee neighbourhoods below to the session
 	// workspace.
 	sessWS, _, _ := s.sessionScope(ctx)
@@ -1376,6 +1396,9 @@ func (s *Server) handleBatchSymbols(ctx context.Context, req mcp.CallToolRequest
 		if includeSource && node.StartLine > 0 && node.EndLine > 0 {
 			if absPath, err := s.resolveNodePath(ctx, node); err == nil {
 				if source, fromLine, totalFileChars, err := s.readLinesForCtx(ctx, absPath, node.StartLine, node.EndLine, contextLines); err == nil {
+					var cut sourceCut
+					source, cut = cutSourceToBudget(source, fromLine, perSymbolBudget)
+					cut.stamp(entry)
 					entry["source"] = source
 					entry["from_line"] = fromLine
 					pending = append(pending, pendingSavings{
@@ -3265,4 +3288,38 @@ func extractPrefix(name string) string {
 		}
 	}
 	return name
+}
+
+// sourceCut records how cutSourceToBudget shortened a symbol's source, in
+// file line numbers.
+type sourceCut struct {
+	cut              bool
+	from, end, total int
+	next             int
+}
+
+func (c sourceCut) lines() string { return fmt.Sprintf("%d-%d of %d", c.from, c.end, c.total) }
+
+// stamp flags the cut with scalars, because degradation may trim an
+// omissions list.
+func (c sourceCut) stamp(out map[string]any) {
+	if c.cut {
+		out["source_truncated"] = true
+		out["source_lines"] = c.lines()
+	}
+}
+
+// cutSourceToBudget keeps the leading whole lines of source, which starts at
+// file line fromLine, that fit budget bytes. A zero budget is an opt-out.
+func cutSourceToBudget(source string, fromLine, budget int) (string, sourceCut) {
+	if budget <= 0 || len(source) <= budget {
+		return source, sourceCut{}
+	}
+	out, end, total, ok := budgetFileLines([]byte(source), budget)
+	if !ok || end >= total {
+		return source, sourceCut{}
+	}
+	return string(out), sourceCut{
+		cut: true, from: fromLine, end: fromLine + end - 1, total: fromLine + total - 1, next: fromLine + end,
+	}
 }
