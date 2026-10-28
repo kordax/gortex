@@ -4,8 +4,10 @@ This fork has independent versions and updates at [kordax/gortex](https://github
 
 `gortex version` identifies the binary with `fork by kordax`, the fork repository, version and commit. Check `command -v gortex` too: an older installation earlier in `PATH` can still win. A running daemon keeps its previous executable until explicitly restarted.
 
-## Current release: v1.3.5
+## Current release: v1.3.6
 
+- Answer edits within the usual bounded wait while the daemon warms up; the graph catches up in the background instead of holding the edit until its deadline.
+- Fall back to the adaptive poller when a large repository's file watcher misses its start window, instead of leaving it unwatched until a restart.
 - Keep oversized symbol sources inside the response budget in get_symbol_source and batch_symbols; a cut source says where to continue.
 - Stop the hook from blocking a Bash grep or find of files outside the graph just because the pattern also names a symbol.
 - Stop re-counting every node and edge on each analysis freshness check, which kept natural-language search waiting until its deadline.
@@ -26,9 +28,9 @@ sh scripts/install.sh
 gortex version
 ```
 
-The installer resolves the latest fork tag and verifies SHA-256. If cosign is installed, it also requires workflow signatures and refuses unsigned manual releases. Keep verification enabled; use the trusted-binary procedure below for an explicitly trusted manual build, substituting `v1.3.5` for `v1.0.0`.
+The installer resolves the latest fork tag and verifies SHA-256. If cosign is installed, it also requires workflow signatures and refuses unsigned manual releases. Keep verification enabled; use the trusted-binary procedure below for an explicitly trusted manual build, substituting `v1.3.6` for `v1.0.0`.
 
-For Debian or Ubuntu, download `gortex_linux_amd64.deb` from [v1.3.5](https://github.com/kordax/gortex/releases/tag/v1.3.5), verify it against `checksums.txt`, then install:
+For Debian or Ubuntu, download `gortex_linux_amd64.deb` from [v1.3.6](https://github.com/kordax/gortex/releases/tag/v1.3.6), verify it against `checksums.txt`, then install:
 
 ```sh
 sudo apt install ./gortex_linux_amd64.deb
