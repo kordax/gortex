@@ -252,6 +252,10 @@ type Server struct {
 	// analysisMu for writing; request readers skip the lock while it is
 	// non-zero. See beginAnalysisRecompute.
 	analysisRecomputes atomic.Int32
+	// communityTokenMemo caches currentCommunityToken's counts between graph
+	// mutations; see currentCommunityToken.
+	communityTokenMu   sync.Mutex
+	communityTokenMemo communityTokenMemo
 
 	// cochange caches the git-history co-change graph. cochangeByFile
 	// maps a file path to its co-changing file paths and association
@@ -2845,15 +2849,46 @@ type communityCacheToken struct {
 	analysisRevision uint64
 }
 
+// communityTokenMemoTTL bounds how long memoized counts may outlive the
+// mutation clocks, should a write path ever fail to advance them.
+const communityTokenMemoTTL = 30 * time.Second
+
+type communityTokenMemo struct {
+	token communityCacheToken
+	at    time.Time
+	valid bool
+}
+
 func (s *Server) currentCommunityToken() communityCacheToken {
+	writer, _ := s.analysisGenerationBackends()
+	if writer == nil {
+		return communityCacheToken{
+			edgeIdentity: s.graph.EdgeIdentityRevisions(),
+			nodeCount:    s.graph.NodeCount(),
+			edgeCount:    s.graph.EdgeCount(),
+		}
+	}
+	// On SQLite NodeCount and EdgeCount are full count(*) scans: 4.8M edges
+	// took tens of seconds on a cold cache, and every analysis reader asks for
+	// this token, so a natural-language search stalled here until its deadline.
+	// Both mutation clocks are cheap atomics that advance on every committed
+	// graph write, so the counts are only recomputed after the graph moved.
+	revision := writer.AnalysisMutationRevision()
+	edgeIdentity := s.graph.EdgeIdentityRevisions()
+	s.communityTokenMu.Lock()
+	defer s.communityTokenMu.Unlock()
+	memo := s.communityTokenMemo
+	if memo.valid && memo.token.analysisRevision == revision &&
+		memo.token.edgeIdentity == edgeIdentity && time.Since(memo.at) < communityTokenMemoTTL {
+		return memo.token
+	}
 	token := communityCacheToken{
-		edgeIdentity: s.graph.EdgeIdentityRevisions(),
-		nodeCount:    s.graph.NodeCount(),
-		edgeCount:    s.graph.EdgeCount(),
+		edgeIdentity:     edgeIdentity,
+		nodeCount:        s.graph.NodeCount(),
+		edgeCount:        s.graph.EdgeCount(),
+		analysisRevision: revision,
 	}
-	if writer, _ := s.analysisGenerationBackends(); writer != nil {
-		token.analysisRevision = writer.AnalysisMutationRevision()
-	}
+	s.communityTokenMemo = communityTokenMemo{token: token, at: time.Now(), valid: true}
 	return token
 }
 
