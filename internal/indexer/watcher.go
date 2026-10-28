@@ -441,6 +441,15 @@ func (pending *symbolChangeNotification) dispatch() {
 	pending.callback(pending.filePath, pending.oldSymbols, pending.newSymbols)
 }
 
+// watcherReadyTimeout bounds how long Start waits for the native backend to
+// report its streams live before falling back to the adaptive poller.
+// watcherReadySignal passes the backend's ready channel through; both are
+// test seams.
+var (
+	watcherReadyTimeout = 5 * time.Second
+	watcherReadySignal  = func(ready chan struct{}) <-chan struct{} { return ready }
+)
+
 // Start begins watching the given paths recursively. The backend is
 // fswatcher, which uses FSEvents on macOS (one stream per root,
 // constant FD cost) and inotify on Linux (one watch per directory in
@@ -571,7 +580,7 @@ func (w *Watcher) Start(paths []string) (retErr error) {
 	// Wait for the backend to become ready or fail fast on early
 	// initialisation errors (e.g. an inotify add returning ENOSPC).
 	select {
-	case <-ready:
+	case <-watcherReadySignal(ready):
 	case err := <-watchErr:
 		cancel()
 		// Watch / FD exhaustion is not a hard failure: keep Start succeeding,
@@ -590,7 +599,7 @@ func (w *Watcher) Start(paths []string) (retErr error) {
 			return nil
 		}
 		return err
-	case <-time.After(5 * time.Second):
+	case <-time.After(watcherReadyTimeout):
 		cancel()
 		// The inotify backend adds a watch per directory, excluded trees
 		// included, so a large checkout (one here holds 42k directories under
