@@ -11,6 +11,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"go.uber.org/zap"
+
 	"github.com/zzet/gortex/internal/indexer"
 )
 
@@ -494,7 +496,79 @@ func (s *Server) mutationReindexState(ctx context.Context, absPath string) mutat
 	if err := ctx.Err(); err != nil {
 		return mutationReindexOutcome{Err: err}
 	}
-	return mutationReindexOutcome{Reindexed: s.reindexFile(absPath)}
+	return s.reindexFileBounded(ctx, absPath)
+}
+
+// detachedReindexJob is one background pass of the no-watcher fallback for a
+// path. done closes after the last pass; ok is its result, readable after done.
+type detachedReindexJob struct {
+	done  chan struct{}
+	ok    bool
+	rerun bool
+}
+
+// reindexFileBounded is the reindex fallback for a server without a live
+// watcher, which the daemon is until warmup starts its watchers. The pass
+// shares the resolver lock with deferred enrichment, so run inline it held an
+// edit for the whole request deadline (59 s seen while warmup enriched the
+// same repo) although the bytes were already on disk. The pass now runs in
+// the background and the edit waits no longer than for a watcher receipt,
+// answering pending when the graph has not caught up. Edits arriving while a
+// pass runs mark it for one more pass instead of starting their own, because
+// the running pass may have read the file before their write.
+func (s *Server) reindexFileBounded(ctx context.Context, absPath string) mutationReindexOutcome {
+	s.detachedReindexMu.Lock()
+	if job := s.detachedReindex[absPath]; job != nil {
+		job.rerun = true
+		s.detachedReindexMu.Unlock()
+		return mutationReindexOutcome{Pending: true}
+	}
+	if s.detachedReindex == nil {
+		s.detachedReindex = make(map[string]*detachedReindexJob)
+	}
+	job := &detachedReindexJob{done: make(chan struct{})}
+	s.detachedReindex[absPath] = job
+	s.detachedReindexMu.Unlock()
+	go s.runDetachedReindex(absPath, job)
+
+	timer := time.NewTimer(s.mutationWaitDuration())
+	defer timer.Stop()
+	select {
+	case <-job.done:
+		return mutationReindexOutcome{Reindexed: job.ok}
+	case <-timer.C:
+	case <-ctx.Done():
+	}
+	return mutationReindexOutcome{Pending: true}
+}
+
+func (s *Server) runDetachedReindex(absPath string, job *detachedReindexJob) {
+	ok := false
+	defer func() {
+		if r := recover(); r != nil && s.logger != nil {
+			s.logger.Error("mcp: background reindex after mutation panicked",
+				zap.String("path", absPath), zap.Any("panic", r), zap.Stack("stack"))
+		}
+		s.detachedReindexMu.Lock()
+		delete(s.detachedReindex, absPath)
+		job.ok = ok
+		s.detachedReindexMu.Unlock()
+		close(job.done)
+	}()
+	reindex := s.reindexFile
+	if s.detachedReindexHook != nil {
+		reindex = s.detachedReindexHook
+	}
+	for {
+		ok = reindex(absPath)
+		s.detachedReindexMu.Lock()
+		rerun := job.rerun
+		job.rerun = false
+		s.detachedReindexMu.Unlock()
+		if !rerun {
+			return
+		}
+	}
 }
 
 // awaitMutationFreshness is the conservative all-repository safety barrier.

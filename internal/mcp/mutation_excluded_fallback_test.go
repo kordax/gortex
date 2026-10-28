@@ -162,7 +162,10 @@ func mutationFallbackStackWaiting() bool {
 	buffer := make([]byte, 1<<20)
 	buffer = buffer[:runtime.Stack(buffer, true)]
 	for _, stack := range strings.Split(string(buffer), "\n\n") {
-		if strings.Contains(stack, ".reindexFile(") && strings.Contains(stack, ".mutationReindexState(") && strings.Contains(stack, ".reconcile(") {
+		// The fallback pass runs on the request goroutine or, bounded, on the
+		// detached one reindexFileBounded starts.
+		fallback := strings.Contains(stack, ".mutationReindexState(") || strings.Contains(stack, ".runDetachedReindex(")
+		if strings.Contains(stack, ".reindexFile(") && fallback && strings.Contains(stack, ".reconcile(") {
 			return true
 		}
 	}
@@ -202,7 +205,8 @@ func TestNeededNoTicketFallbackCancellationRetainsPublication(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("publication did not complete after executor release")
 	}
-	assert.NotEmpty(t, s.graph.GetFileNodes("target.go"), "confirmed disk commit must eventually reach the graph even when client stops waiting")
+	assert.Eventually(t, func() bool { return len(s.graph.GetFileNodes("target.go")) > 0 }, 5*time.Second, 5*time.Millisecond,
+		"confirmed disk commit must eventually reach the graph even when client stops waiting")
 }
 
 type uncertainExclusionWatcher struct {

@@ -378,6 +378,14 @@ type Server struct {
 	mutationReindexWait time.Duration
 	mutationSafetyWait  time.Duration
 
+	// detachedReindex coalesces the no-watcher reindex fallback per path; see
+	// reindexFileBounded. The zero value is usable.
+	detachedReindexMu sync.Mutex
+	detachedReindex   map[string]*detachedReindexJob
+	// detachedReindexHook replaces reindexFile in that fallback; a test seam,
+	// nil in production.
+	detachedReindexHook func(absPath string) bool
+
 	// mutationCommits is the durable disk-commit ledger for the single-file
 	// mutating tools (mutation_commit.go). It answers the question the
 	// transport cannot: when a tool call is abandoned at its deadline, did the
