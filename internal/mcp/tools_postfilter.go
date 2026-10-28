@@ -257,11 +257,36 @@ func (s *Server) handleCtxGrep(ctx context.Context, req mcp.CallToolRequest) (*m
 		truncated = true
 	}
 
+	// A buffered response is often one JSON line of hundreds of KB; echoing
+	// a matched line whole (twice, in matches and block) shipped up to 487 KB.
+	// Matched lines keep a window around their first match, context lines
+	// their head.
+	clipped := false
+	view := make([]string, len(lines))
+	copy(view, lines)
+	shown := make(map[int]bool, len(matchRows))
+	for _, i := range matchRows {
+		shown[i] = true
+		var cut bool
+		view[i], cut = clipGrepLine(lines[i], re, ctxGrepLineCap)
+		clipped = clipped || cut
+	}
+	for _, i := range matchRows {
+		for j := max(0, i-before); j <= min(len(lines)-1, i+after); j++ {
+			if shown[j] {
+				continue
+			}
+			shown[j] = true
+			var cut bool
+			view[j], cut = clipGrepLine(lines[j], nil, ctxGrepLineCap)
+			clipped = clipped || cut
+		}
+	}
 	matches := make([]map[string]any, 0, len(matchRows))
 	for _, i := range matchRows {
 		matches = append(matches, map[string]any{
 			"line": i + 1,
-			"text": lines[i],
+			"text": view[i],
 		})
 	}
 	return mcp.NewToolResultJSON(map[string]any{
@@ -271,10 +296,40 @@ func (s *Server) handleCtxGrep(ctx context.Context, req mcp.CallToolRequest) (*m
 		"match_count": total,
 		"returned":    len(matchRows),
 		"truncated":   truncated,
-		"total_lines": len(lines),
-		"matches":     matches,
-		"block":       grepBlock(lines, matchRows, before, after),
+		"total_lines":  len(lines),
+		"matches":      matches,
+		"line_clipped": clipped,
+		"block":        grepBlock(view, matchRows, before, after),
 	})
+}
+
+// ctxGrepLineCap bounds one echoed line; ctx_head/ctx_tail serve whole lines.
+const ctxGrepLineCap = 512
+
+// clipGrepLine shortens a line longer than limit bytes: around the first match
+// of re when given, otherwise from its head, marking each cut end with "…".
+func clipGrepLine(line string, re *regexp.Regexp, limit int) (string, bool) {
+	if len(line) <= limit {
+		return line, false
+	}
+	start := 0
+	if re != nil {
+		if loc := re.FindStringIndex(line); loc != nil {
+			start = max(0, loc[0]-limit/4)
+		}
+	}
+	end := min(len(line), start+limit)
+	if end == len(line) {
+		start = max(0, end-limit)
+	}
+	out := strings.ToValidUTF8(line[start:end], "")
+	if start > 0 {
+		out = "…" + out
+	}
+	if end < len(line) {
+		out += "…"
+	}
+	return out, true
 }
 
 // grepBlock renders matched lines and their context the way grep -C

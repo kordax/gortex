@@ -613,6 +613,21 @@ func (s *Server) handleGetEditingContext(ctx context.Context, req mcp.CallToolRe
 		}
 	}
 
+	// The compressed view is one string, which the response budget's list
+	// trimming cannot shorten: on a 13k-line file it shipped 360 KB. Keep the
+	// leading whole lines inside half the budget; the structured lists keep
+	// the other half and their own degradation.
+	compressedCut := false
+	var compressedEnd, compressedTotal int
+	if sourceCompressed != "" {
+		if budget := readFileContentBudget(req) / 2; budget > 0 && len(sourceCompressed) > budget {
+			if cut, end, total, ok := budgetFileLines([]byte(sourceCompressed), budget); ok && end < total {
+				sourceCompressed, compressedCut = string(cut), true
+				compressedEnd, compressedTotal = end, total
+			}
+		}
+	}
+
 	// ETag conditional fetch.
 	etag := computeETag(out)
 	if sourceCompressed != "" {
@@ -641,6 +656,12 @@ func (s *Server) handleGetEditingContext(ctx context.Context, req mcp.CallToolRe
 		omissions = append(omissions, omission("compressed",
 			"source_compressed replaces function and method bodies with elided stubs; signatures kept"))
 	}
+	if compressedCut {
+		omissions = append(omissions, omission("source_compressed_windowed",
+			fmt.Sprintf("source_compressed holds the first %d of %d compressed lines to fit the response budget; "+
+				"read_file with compress_bodies:true and offset/limit reads the rest, or pass max_bytes:0 for all of it",
+				compressedEnd, compressedTotal)))
+	}
 	if viewReadFailure != "" {
 		// Without this the caller cannot tell a file with nothing to compress
 		// from one whose bytes the view could not produce.
@@ -664,6 +685,12 @@ func (s *Server) handleGetEditingContext(ctx context.Context, req mcp.CallToolRe
 	if sourceCompressed != "" {
 		result["source_compressed"] = sourceCompressed
 		result["bodies_elided"] = true
+		if compressedCut {
+			// Scalars as well as the omission: budget degradation trims
+			// lists, omissions included, but keeps these.
+			result["source_compressed_truncated"] = true
+			result["source_compressed_lines"] = fmt.Sprintf("1-%d of %d", compressedEnd, compressedTotal)
+		}
 		if len(keptSymbols) > 0 {
 			result["kept_symbols"] = keptSymbols
 		}
@@ -675,9 +702,8 @@ func (s *Server) handleGetEditingContext(ctx context.Context, req mcp.CallToolRe
 	if len(omissions) > 0 {
 		result["omissions"] = omissions
 	}
-	if s.isTOON(ctx, req) {
-		return returnTOON(result)
-	}
+	// respondJSONOrTOON renders TOON itself, after the budget; an early TOON
+	// return skipped the budget entirely.
 	return s.respondJSONOrTOON(ctx, req, result)
 }
 

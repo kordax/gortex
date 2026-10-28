@@ -1368,6 +1368,50 @@ func windowFileLines(content []byte, offset, limit int) (out []byte, applied boo
 	return []byte(strings.Join(lines[start-1:end], "\n")), true, start, end, total
 }
 
+// readFileContentReserve is the share of the response budget kept for
+// read_file's metadata (path, window, omissions, etag, dependents) so the
+// whole response, not just its content, stays inside the cap.
+const readFileContentReserve = 4 << 10
+
+// readFileContentBudget is how many content bytes an unbounded read may
+// return: the effective response budget less the metadata reserve, or 0 when
+// the caller opted out of budgeting with max_bytes:0.
+func readFileContentBudget(req mcp.CallToolRequest) int {
+	budget := effectiveBudget(req)
+	if budget <= 0 {
+		return 0
+	}
+	return max(budget-readFileContentReserve, readFileContentReserve)
+}
+
+// budgetFileLines keeps the leading whole lines of content that fit budget
+// bytes, counted the way windowFileLines counts them, so the reported window
+// continues with offset=end+1. ok is false when not even the first line fits,
+// leaving the caller to fall back to a byte cap.
+func budgetFileLines(content []byte, budget int) (out []byte, end, total int, ok bool) {
+	lines := strings.Split(string(content), "\n")
+	total = len(lines)
+	if total > 0 && lines[total-1] == "" {
+		total--
+	}
+	size := 0
+	for end < total {
+		next := len(lines[end])
+		if end > 0 {
+			next++ // the separating newline
+		}
+		if size+next > budget {
+			break
+		}
+		size += next
+		end++
+	}
+	if end == 0 {
+		return nil, 0, total, false
+	}
+	return []byte(strings.Join(lines[:end], "\n")), end, total, true
+}
+
 func capReadFileContent(content []byte, maxChars int, binary bool) ([]byte, bool) {
 	if maxChars <= 0 || len(content) <= maxChars {
 		return content, false
@@ -1704,6 +1748,24 @@ func (s *Server) handleReadFile(ctx context.Context, req mcp.CallToolRequest) (*
 	}
 
 	maxChars := req.GetInt("max_chars", 0)
+	// An unbounded read used to ship whole files (300 KB+ observed) into the
+	// agent's context: the generic response budget only trims lists, and the
+	// content is one string. A read that asked for no window, no transform and
+	// no cap of its own now returns the leading whole lines that fit the
+	// response budget, as an ordinary window the caller can continue with
+	// offset. max_bytes:0 still opts out and returns the whole file.
+	budgetWindowed := false
+	if !windowed && !bodiesElided && !salienceTruncated && !isBinary && maxChars == 0 {
+		if budget := readFileContentBudget(req); budget > 0 && len(content) > budget {
+			switch cut, end, total, ok := budgetFileLines(content, budget); {
+			case !ok:
+				maxChars = budget
+			case end < total:
+				content, windowed, budgetWindowed = cut, true, true
+				winStart, winEnd, winTotal = 1, end, total
+			}
+		}
+	}
 	content, contentTruncated := capReadFileContent(content, maxChars, isBinary)
 
 	result := map[string]any{
@@ -1791,7 +1853,10 @@ func (s *Server) handleReadFile(ctx context.Context, req mcp.CallToolRequest) (*
 	if utf16Decoded {
 		omissions = append(omissions, utf16DecodedOmission())
 	}
-	if windowed {
+	if budgetWindowed {
+		omissions = append(omissions, omission("windowed",
+			fmt.Sprintf("returned lines %d-%d of %d to fit the response budget; continue with offset=%d, or pass max_bytes:0 for the whole file", winStart, winEnd, winTotal, winEnd+1)))
+	} else if windowed {
 		omissions = append(omissions, omission("windowed",
 			fmt.Sprintf("returned lines %d-%d of %d; the rest of the file was not included (offset/limit window)", winStart, winEnd, winTotal)))
 	}
@@ -1836,9 +1901,8 @@ func (s *Server) handleReadFile(ctx context.Context, req mcp.CallToolRequest) (*
 
 	s.attachFileDependents(ctx, result, relPath)
 
-	if s.isTOON(ctx, req) {
-		return returnTOON(result)
-	}
+	// respondJSONOrTOON renders TOON itself, after the budget; an early TOON
+	// return skipped the budget entirely.
 	return s.respondJSONOrTOON(ctx, req, result)
 }
 
