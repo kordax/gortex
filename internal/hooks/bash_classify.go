@@ -41,6 +41,7 @@ const (
 type BashClassification struct {
 	Action  BashAction
 	Pattern string      // for GrepLike / FindName
+	Scopes  []string    // explicit search roots for GrepLike / FindName
 	Path    string      // for ReadSource / ReadRange / WriteSource
 	Writes  []BashWrite // every recognised write target, for WriteSource
 	Primary string      // the primary command token (grep, rg, cat, …) — for messages
@@ -92,11 +93,13 @@ func classifyBashReadCommand(cmd string) BashClassification {
 		switch tokens[0] {
 		case "grep", "rg", "ag", "egrep", "fgrep":
 			if p, ok := extractGrepPattern(tokens); ok {
-				return BashClassification{Action: BashActionGrepLike, Pattern: p, Primary: tokens[0]}
+				scopes, _ := bashSearchScopes(tokens, BashActionGrepLike)
+				return BashClassification{Action: BashActionGrepLike, Pattern: p, Scopes: scopes, Primary: tokens[0]}
 			}
 		case "find":
 			if p, ok := extractFindName(tokens); ok {
-				return BashClassification{Action: BashActionFindName, Pattern: p, Primary: tokens[0]}
+				scopes, _ := bashSearchScopes(tokens, BashActionFindName)
+				return BashClassification{Action: BashActionFindName, Pattern: p, Scopes: scopes, Primary: tokens[0]}
 			}
 		case "cat", "head", "tail":
 			if path, ok := extractReadFile(tokens); ok {
@@ -325,6 +328,49 @@ func extractGrepPatternAt(tokens []string) (string, int, bool) {
 		return t, i, true
 	}
 	return "", -1, false
+}
+
+// bashSearchScopes returns the explicit search roots of a grep/rg or find
+// command: grep's operands after the pattern, find's paths before the first
+// expression. tokens[0] is the command itself. An empty result means the
+// command searches its working directory.
+func bashSearchScopes(tokens []string, action BashAction) ([]string, bool) {
+	var scopes []string
+	switch action {
+	case BashActionGrepLike:
+		_, patternAt, ok := extractGrepPatternAt(tokens)
+		if !ok {
+			return nil, false
+		}
+		for i := patternAt + 1; i < len(tokens); i++ {
+			token := tokens[i]
+			if token == "--" {
+				scopes = append(scopes, tokens[i+1:]...)
+				break
+			}
+			if strings.HasPrefix(token, "--") && strings.Contains(token, "=") {
+				continue
+			}
+			if grepFlagsTakingArg[token] {
+				i++
+				continue
+			}
+			if strings.HasPrefix(token, "-") {
+				continue
+			}
+			scopes = append(scopes, token)
+		}
+	case BashActionFindName:
+		for _, token := range tokens[1:] {
+			if strings.HasPrefix(token, "-") || token == "!" || token == "(" {
+				break
+			}
+			scopes = append(scopes, token)
+		}
+	default:
+		return nil, false
+	}
+	return scopes, true
 }
 
 // extractFindName walks tokens looking for `-name`/`-iname` and returns the

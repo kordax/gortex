@@ -1337,6 +1337,44 @@ func repoRootForFile(abs string) string {
 	return repo.Path
 }
 
+// bashSearchOutsideSource reports whether every explicit root of a Bash
+// grep/find is proven to hold no indexed source, judged the way a Grep tool
+// `path` is. Grepping a notes file for a word that also names a symbol is a
+// text search; denying it sent agents to a graph that has nothing of the file.
+// No explicit root, a shell expansion, or an unproven root keeps the pattern
+// probe.
+func bashSearchOutsideSource(cwd string, scopes []string) bool {
+	if len(scopes) == 0 {
+		return false
+	}
+	for _, scope := range scopes {
+		scope, ok := expandBashScope(scope)
+		if !ok || hookSearchScope(cwd, map[string]any{"path": scope}) != searchScopeNonSource {
+			return false
+		}
+	}
+	return true
+}
+
+// expandBashScope resolves a leading ~ the way the shell would. Any other
+// expansion is left unresolved: the hook cannot know what it names.
+func expandBashScope(scope string) (string, bool) {
+	if scope == "" || strings.ContainsAny(scope, "$`") {
+		return "", false
+	}
+	if scope == "~" || strings.HasPrefix(scope, "~/") {
+		home, err := os.UserHomeDir()
+		if err != nil || home == "" {
+			return "", false
+		}
+		return filepath.Join(home, strings.TrimPrefix(scope, "~")), true
+	}
+	if strings.HasPrefix(scope, "~") {
+		return "", false
+	}
+	return scope, true
+}
+
 // enrichBash classifies the Bash command and routes codebase-search shapes
 // through the same graph probes the Grep and Read enrichments use, and shell
 // mutations of indexed source through the same answer Edit and Write get.
@@ -1361,9 +1399,15 @@ func enrichBash(toolInput map[string]any, cwd string) enrichResult {
 	}
 	switch c.Action {
 	case BashActionGrepLike:
+		if bashSearchOutsideSource(cwd, c.Scopes) {
+			return enrichResult{}
+		}
 		return probeSymbolPattern("Bash", c.Pattern, cwd, defaultGrepGuidance())
 
 	case BashActionFindName:
+		if bashSearchOutsideSource(cwd, c.Scopes) {
+			return enrichResult{}
+		}
 		// find -name values often include `*` globs; the classifier has
 		// already stripped wildcards, but the residue may still be
 		// non-symbol-shaped (e.g. ".go" from `-name "*.go"`) — let

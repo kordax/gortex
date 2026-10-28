@@ -239,39 +239,8 @@ func bashSearchTargetsWorkspace(command, cwd string, action BashAction) bool {
 	if len(tokens) == 0 {
 		return false
 	}
-	var scopes []string
-	switch action {
-	case BashActionGrepLike:
-		_, patternAt, ok := extractGrepPatternAt(tokens)
-		if !ok {
-			return false
-		}
-		for i := patternAt + 1; i < len(tokens); i++ {
-			token := tokens[i]
-			if token == "--" {
-				scopes = append(scopes, tokens[i+1:]...)
-				break
-			}
-			if strings.HasPrefix(token, "--") && strings.Contains(token, "=") {
-				continue
-			}
-			if grepFlagsTakingArg[token] {
-				i++
-				continue
-			}
-			if strings.HasPrefix(token, "-") {
-				continue
-			}
-			scopes = append(scopes, token)
-		}
-	case BashActionFindName:
-		for _, token := range tokens[1:] {
-			if strings.HasPrefix(token, "-") || token == "!" || token == "(" {
-				break
-			}
-			scopes = append(scopes, token)
-		}
-	default:
+	scopes, ok := bashSearchScopes(tokens, action)
+	if !ok {
 		return false
 	}
 	if len(scopes) == 0 {
