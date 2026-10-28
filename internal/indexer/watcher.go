@@ -592,7 +592,30 @@ func (w *Watcher) Start(paths []string) (retErr error) {
 		return err
 	case <-time.After(5 * time.Second):
 		cancel()
-		return errors.New("watcher: backend did not become ready within 5s")
+		// The inotify backend adds a watch per directory, excluded trees
+		// included, so a large checkout (one here holds 42k directories under
+		// a Rust target/) can outlast the window while the whole fleet starts
+		// on a busy machine. Failing left that repository unwatched until the
+		// daemon restarted; it now gets the adaptive poller, the fallback watch
+		// exhaustion already uses.
+		select {
+		case werr := <-watchErr:
+			if werr != nil && !errors.Is(werr, context.Canceled) && w.logger != nil {
+				w.logger.Warn("watcher: backend stopped with an error after the readiness timeout", zap.Error(werr))
+			}
+		case <-time.After(5 * time.Second):
+		}
+		w.markDegraded(
+			"the native file watcher did not start in time — the adaptive poller covers changes until the daemon restarts",
+			"watcher: backend did not become ready within 5s; falling back to the adaptive poller")
+		w.degradedNoFsnotify = true
+		if w.fsw != nil {
+			w.fsw.Close()
+			w.fsw = nil
+		}
+		w.poller = newPoller(w, w.indexer, w.logger)
+		w.poller.Start()
+		return nil
 	}
 	// FSEvents reports its stream as "started" before its startup replay has
 	// drained. Synthetic exists events and genuine writes are indistinguishable,
