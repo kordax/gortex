@@ -1,0 +1,765 @@
+{
+  "uid": "gortex-indexing",
+  "title": "Gortex / Indexing and edits",
+  "tags": [
+    "gortex",
+    "indexing"
+  ],
+  "timezone": "browser",
+  "schemaVersion": 41,
+  "version": 1,
+  "editable": false,
+  "refresh": "10s",
+  "time": {
+    "from": "now-1h",
+    "to": "now"
+  },
+  "templating": {
+    "list": [
+      {
+        "name": "instance",
+        "label": "Daemon",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "gortex-prometheus"
+        },
+        "query": "label_values(up{job=\"gortex\"}, instance)",
+        "refresh": 1
+      },
+      {
+        "name": "repo",
+        "label": "Repository",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "gortex-prometheus"
+        },
+        "query": "label_values(gortex_index_patches_total{job=\"gortex\",instance=\"$instance\"}, repo)",
+        "includeAll": true,
+        "allValue": ".*",
+        "multi": true,
+        "refresh": 2
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "title": "How to read edit flow",
+      "type": "text",
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 24,
+        "h": 3
+      },
+      "options": {
+        "mode": "markdown",
+        "content": "A change on disk reaches the graph as a **patch** (one file) or a **burst drain** (many files together). Slow patches and deferred patches are why agents see stale names or tools that wait on the graph. **Deferred** means a change gave up waiting for a mutation slot and was rescheduled. A watcher that is not `watching` either polls (degraded) or never started (failed). Series start when the daemon first records them; missing data is unavailable, not zero."
+      }
+    },
+    {
+      "id": 2,
+      "title": "Watchers not watching",
+      "description": "Repositories whose file watcher is degraded, failed or still starting.",
+      "type": "stat",
+      "gridPos": {
+        "x": 0,
+        "y": 3,
+        "w": 6,
+        "h": 5
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "gortex-prometheus"
+      },
+      "targets": [
+        {
+          "expr": "count(gortex_watcher_state{job=\"gortex\",instance=\"$instance\",state!=\"watching\"})",
+          "legendFormat": "not watching",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 1
+              },
+              {
+                "color": "red",
+                "value": 5
+              }
+            ]
+          }
+        }
+      },
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        }
+      }
+    },
+    {
+      "id": 3,
+      "title": "Edit apply p95",
+      "description": "95th percentile time from a changed file to its graph patch, last 5 minutes.",
+      "type": "stat",
+      "gridPos": {
+        "x": 6,
+        "y": 3,
+        "w": 6,
+        "h": 5
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "gortex-prometheus"
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(gortex_index_patch_duration_seconds_bucket{job=\"gortex\",instance=\"$instance\"}[5m])))",
+          "legendFormat": "p95",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "decimals": 1,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 5
+              },
+              {
+                "color": "red",
+                "value": 30
+              }
+            ]
+          }
+        }
+      },
+      "options": {
+        "colorMode": "background",
+        "graphMode": "area",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        }
+      }
+    },
+    {
+      "id": 4,
+      "title": "Deferred changes, last hour",
+      "description": "Changes that waited out a mutation slot and were rescheduled.",
+      "type": "stat",
+      "gridPos": {
+        "x": 12,
+        "y": 3,
+        "w": 6,
+        "h": 5
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "gortex-prometheus"
+      },
+      "targets": [
+        {
+          "expr": "sum(increase(gortex_index_deferred_patches_total{job=\"gortex\",instance=\"$instance\"}[1h]))",
+          "legendFormat": "deferred",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "decimals": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 1
+              },
+              {
+                "color": "red",
+                "value": 20
+              }
+            ]
+          }
+        }
+      },
+      "options": {
+        "colorMode": "background",
+        "graphMode": "area",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        }
+      }
+    },
+    {
+      "id": 5,
+      "title": "Burst drain p95",
+      "description": "95th percentile time to reindex a burst of changed files, last 15 minutes.",
+      "type": "stat",
+      "gridPos": {
+        "x": 18,
+        "y": 3,
+        "w": 6,
+        "h": 5
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "gortex-prometheus"
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(gortex_index_storm_drain_duration_seconds_bucket{job=\"gortex\",instance=\"$instance\"}[15m])))",
+          "legendFormat": "p95",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "decimals": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 30
+              },
+              {
+                "color": "red",
+                "value": 120
+              }
+            ]
+          }
+        }
+      },
+      "options": {
+        "colorMode": "background",
+        "graphMode": "area",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        }
+      }
+    },
+    {
+      "id": 6,
+      "title": "Edit apply latency p50 / p95 / p99",
+      "description": "Time from a changed file to its graph patch across all repositories.",
+      "type": "timeseries",
+      "gridPos": {
+        "x": 0,
+        "y": 8,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "gortex-prometheus"
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.5, sum by (le) (rate(gortex_index_patch_duration_seconds_bucket{job=\"gortex\",instance=\"$instance\"}[$__rate_interval])))",
+          "legendFormat": "p50",
+          "refId": "A"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(gortex_index_patch_duration_seconds_bucket{job=\"gortex\",instance=\"$instance\"}[$__rate_interval])))",
+          "legendFormat": "p95",
+          "refId": "B"
+        },
+        {
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(gortex_index_patch_duration_seconds_bucket{job=\"gortex\",instance=\"$instance\"}[$__rate_interval])))",
+          "legendFormat": "p99",
+          "refId": "C"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "min": 0,
+          "unit": "s"
+        }
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "calcs": [
+            "max",
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 7,
+      "title": "Average patch time by repository",
+      "description": "Seconds per applied file, the ten slowest repositories.",
+      "type": "timeseries",
+      "gridPos": {
+        "x": 12,
+        "y": 8,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "gortex-prometheus"
+      },
+      "targets": [
+        {
+          "expr": "topk(10, sum by (repo) (rate(gortex_index_patch_seconds_total{job=\"gortex\",instance=\"$instance\",repo=~\"$repo\"}[$__rate_interval])) / sum by (repo) (rate(gortex_index_patches_total{job=\"gortex\",instance=\"$instance\",repo=~\"$repo\"}[$__rate_interval])))",
+          "legendFormat": "{{repo}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "min": 0,
+          "unit": "s"
+        }
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "calcs": [
+            "max",
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 8,
+      "title": "Changes applied / minute by repository",
+      "description": "Files reaching the graph per minute, by patch or burst drain.",
+      "type": "timeseries",
+      "gridPos": {
+        "x": 0,
+        "y": 16,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "gortex-prometheus"
+      },
+      "targets": [
+        {
+          "expr": "topk(10, sum by (repo) (rate(gortex_index_patches_total{job=\"gortex\",instance=\"$instance\",repo=~\"$repo\"}[$__rate_interval]) * 60 + rate(gortex_index_storm_drain_paths_total{job=\"gortex\",instance=\"$instance\",repo=~\"$repo\"}[$__rate_interval]) * 60))",
+          "legendFormat": "{{repo}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "min": 0,
+          "unit": "none"
+        }
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "calcs": [
+            "max",
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 9,
+      "title": "Deferred changes / minute by repository",
+      "description": "Changes that gave up waiting for a mutation slot. Sustained values mean the repository's mutation lane is jammed.",
+      "type": "timeseries",
+      "gridPos": {
+        "x": 12,
+        "y": 16,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "gortex-prometheus"
+      },
+      "targets": [
+        {
+          "expr": "topk(10, sum by (repo) (rate(gortex_index_deferred_patches_total{job=\"gortex\",instance=\"$instance\",repo=~\"$repo\"}[$__rate_interval]) * 60))",
+          "legendFormat": "{{repo}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "min": 0,
+          "unit": "none"
+        }
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "calcs": [
+            "max",
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 10,
+      "title": "Burst drain latency p50 / p95",
+      "description": "Time to reindex one burst of changed files, such as a branch switch or a commit.",
+      "type": "timeseries",
+      "gridPos": {
+        "x": 0,
+        "y": 24,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "gortex-prometheus"
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.5, sum by (le) (rate(gortex_index_storm_drain_duration_seconds_bucket{job=\"gortex\",instance=\"$instance\"}[$__rate_interval])))",
+          "legendFormat": "p50",
+          "refId": "A"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(gortex_index_storm_drain_duration_seconds_bucket{job=\"gortex\",instance=\"$instance\"}[$__rate_interval])))",
+          "legendFormat": "p95",
+          "refId": "B"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "min": 0,
+          "unit": "s"
+        }
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "calcs": [
+            "max",
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 11,
+      "title": "Derived passes p95 and framework share",
+      "description": "Derived graph passes after a change; framework share is the fraction spent in framework synthesis (0 to 1).",
+      "type": "timeseries",
+      "gridPos": {
+        "x": 12,
+        "y": 24,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "gortex-prometheus"
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(gortex_index_derived_duration_seconds_bucket{job=\"gortex\",instance=\"$instance\"}[$__rate_interval])))",
+          "legendFormat": "derived p95 (s)",
+          "refId": "A"
+        },
+        {
+          "expr": "sum(rate(gortex_index_derived_framework_seconds_total{job=\"gortex\",instance=\"$instance\"}[$__rate_interval])) / sum(rate(gortex_index_derived_duration_seconds_sum{job=\"gortex\",instance=\"$instance\"}[$__rate_interval]))",
+          "legendFormat": "framework share",
+          "refId": "B"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "min": 0,
+          "unit": "s"
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "framework share"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "percentunit"
+              },
+              {
+                "id": "custom.axisPlacement",
+                "value": "right"
+              },
+              {
+                "id": "max",
+                "value": 1
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "calcs": [
+            "max",
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 12,
+      "title": "Watchers that need attention",
+      "description": "Repositories whose watcher is not in the watching state.",
+      "type": "table",
+      "gridPos": {
+        "x": 0,
+        "y": 32,
+        "w": 12,
+        "h": 9
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "gortex-prometheus"
+      },
+      "targets": [
+        {
+          "expr": "gortex_watcher_state{job=\"gortex\",instance=\"$instance\",state!=\"watching\"}",
+          "format": "table",
+          "instant": true,
+          "refId": "A"
+        }
+      ],
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true,
+              "Value": true,
+              "__name__": true,
+              "job": true,
+              "instance": true
+            },
+            "renameByName": {
+              "repo": "Repository",
+              "state": "Watcher"
+            }
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Watcher"
+            },
+            "properties": [
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "color-text"
+                }
+              },
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "type": "value",
+                    "options": {
+                      "failed": {
+                        "color": "red",
+                        "index": 0
+                      },
+                      "degraded": {
+                        "color": "orange",
+                        "index": 1
+                      },
+                      "starting": {
+                        "color": "blue",
+                        "index": 2
+                      }
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": 13,
+      "title": "Time since the last change reached the graph",
+      "description": "Per repository; a repository you are editing with a large value is not receiving its changes.",
+      "type": "table",
+      "gridPos": {
+        "x": 12,
+        "y": 32,
+        "w": 12,
+        "h": 9
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "gortex-prometheus"
+      },
+      "targets": [
+        {
+          "expr": "time() - gortex_index_last_change_timestamp_seconds{job=\"gortex\",instance=\"$instance\",repo=~\"$repo\"}",
+          "format": "table",
+          "instant": true,
+          "refId": "A"
+        }
+      ],
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true,
+              "__name__": true,
+              "job": true,
+              "instance": true
+            },
+            "renameByName": {
+              "repo": "Repository",
+              "Value": "Since last change"
+            }
+          }
+        },
+        {
+          "id": "sortBy",
+          "options": {
+            "sort": [
+              {
+                "field": "Since last change"
+              }
+            ]
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "decimals": 0
+        }
+      }
+    },
+    {
+      "id": 14,
+      "title": "Repositories by time spent applying changes",
+      "description": "Total seconds spent on patches and burst drains over the selected range.",
+      "type": "bargauge",
+      "gridPos": {
+        "x": 0,
+        "y": 41,
+        "w": 24,
+        "h": 9
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "gortex-prometheus"
+      },
+      "targets": [
+        {
+          "expr": "topk(15, sum by (repo) (increase(gortex_index_patch_seconds_total{job=\"gortex\",instance=\"$instance\",repo=~\"$repo\"}[$__range]) + increase(gortex_index_storm_drain_seconds_total{job=\"gortex\",instance=\"$instance\",repo=~\"$repo\"}[$__range])))",
+          "legendFormat": "{{repo}}",
+          "instant": true,
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "min": 0,
+          "color": {
+            "mode": "continuous-GrYlRd"
+          }
+        }
+      },
+      "options": {
+        "orientation": "horizontal",
+        "displayMode": "gradient",
+        "showUnfilled": true,
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        }
+      }
+    }
+  ]
+}

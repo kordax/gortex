@@ -7,6 +7,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/zzet/gortex/internal/entrypoints"
+	"github.com/zzet/gortex/internal/observability"
 	"github.com/zzet/gortex/internal/reach"
 	"github.com/zzet/gortex/internal/resolver"
 )
@@ -331,7 +332,11 @@ func (mi *MultiIndexer) runIncrementalDerivedPassesTopologyHeld(
 		report.ContractsDuration = time.Since(phase)
 	}
 
-	report.DurationMs = time.Since(started).Milliseconds()
+	elapsed := time.Since(started)
+	report.DurationMs = elapsed.Milliseconds()
+	if elapsed >= time.Millisecond {
+		observability.Indexing.ObserveDerivedPasses(elapsed, report.FrameworkDuration)
+	}
 	mi.logIncrementalDerived(report, merged)
 	return report
 }

@@ -1142,6 +1142,39 @@ func (mw *MultiWatcher) DegradedReasonFor(prefix string) string {
 	return ""
 }
 
+// Watcher states WatcherStates reports per repository.
+const (
+	WatcherStateWatching = "watching"
+	WatcherStateDegraded = "degraded"
+	WatcherStateFailed   = "failed"
+	WatcherStateStarting = "starting"
+)
+
+// WatcherStates names each configured repository's watcher condition:
+// watching, degraded (edits reach the graph through a fallback or may lag),
+// failed (the watcher never started) or starting.
+func (mw *MultiWatcher) WatcherStates() map[string]string {
+	mw.mu.Lock()
+	defer mw.mu.Unlock()
+	states := make(map[string]string, len(mw.watchers)+len(mw.startFailures))
+	for prefix, w := range mw.watchers {
+		switch {
+		case mw.startFailures[prefix] != "":
+			states[prefix] = WatcherStateFailed
+		case !mw.started[prefix]:
+			states[prefix] = WatcherStateStarting
+		case w.DegradedReason() != "":
+			states[prefix] = WatcherStateDegraded
+		default:
+			states[prefix] = WatcherStateWatching
+		}
+	}
+	for prefix := range mw.startFailures {
+		states[prefix] = WatcherStateFailed
+	}
+	return states
+}
+
 func qualifyRepoReason(prefix, reason string) string {
 	if prefix == "" {
 		return reason

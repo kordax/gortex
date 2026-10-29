@@ -33,6 +33,10 @@ func TestMultiWatcherReportsRepoThatNeverStarted(t *testing.T) {
 	// freshness rider asks only about the repository that owns the file.
 	require.Contains(t, mw.DegradedReasonFor("repo-a"), "repo-a")
 	require.Empty(t, mw.DegradedReasonFor("repo-b"), "a healthy repository must not inherit another repository's watcher failure")
+
+	states := mw.WatcherStates()
+	require.Equal(t, WatcherStateFailed, states["repo-a"])
+	require.Equal(t, WatcherStateWatching, states["repo-b"])
 }
 
 // TestMultiWatcherHealthyWhenAllReposStart guards against the inverse: a fully
@@ -48,4 +52,7 @@ func TestMultiWatcherHealthyWhenAllReposStart(t *testing.T) {
 	require.Equal(t, configured, live)
 	require.Equal(t, 2, live)
 	require.Empty(t, mw.DegradedReason())
+	for repo, state := range mw.WatcherStates() {
+		require.Equal(t, WatcherStateWatching, state, repo)
+	}
 }

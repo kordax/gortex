@@ -3,6 +3,7 @@ package indexer
 import (
 	"context"
 	"errors"
+	"github.com/zzet/gortex/internal/observability"
 	"runtime"
 	"sync"
 	"time"
@@ -92,7 +93,11 @@ func (w *Watcher) mutationAdmissionWaitDuration() time.Duration {
 // per mutationShedLogInterval. The first deferral of a burst logs immediately;
 // the rest accumulate into that line's count.
 func (w *Watcher) noteDeferredPatch(path string, waited time.Duration) {
-	if w == nil || w.logger == nil {
+	if w == nil {
+		return
+	}
+	observability.Indexing.NoteDeferredPatch(w.metricRepo())
+	if w.logger == nil {
 		return
 	}
 	w.shedMu.Lock()

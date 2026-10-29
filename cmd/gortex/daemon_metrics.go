@@ -4,11 +4,13 @@ import (
 	"context"
 	"net/http"
 	"runtime"
+	"sort"
 	"strings"
 	"sync/atomic"
 	"time"
 
 	"github.com/zzet/gortex/internal/daemon"
+	"github.com/zzet/gortex/internal/indexer"
 	"github.com/zzet/gortex/internal/mcp"
 	"github.com/zzet/gortex/internal/observability"
 )
@@ -153,6 +155,10 @@ func daemonMetricsHandler(ctx context.Context, srv *daemon.Server, c *realContro
 			writeDaemonSQLMetrics(e, c.graph, files.Load())
 		}
 		observability.Default.Write(e)
+		observability.Indexing.Write(e)
+		if c != nil {
+			writeWatcherStateMetrics(e, c.watcher())
+		}
 		gauge("mcp_abandoned_handlers", "Timed-out or cancelled MCP handlers still running in the background.", float64(mcp.AbandonedToolCalls()))
 	})
 }
@@ -162,4 +168,24 @@ func metricRepoName(name string) bool {
 		return false
 	}
 	return true
+}
+
+// writeWatcherStateMetrics emits one series per repository naming its watcher
+// condition, so a repository whose edits stop reaching the graph is visible
+// without reading the log.
+func writeWatcherStateMetrics(e *observability.Exposition, mw *indexer.MultiWatcher) {
+	if mw == nil {
+		return
+	}
+	states := mw.WatcherStates()
+	repos := make([]string, 0, len(states))
+	for repo := range states {
+		if metricRepoName(repo) {
+			repos = append(repos, repo)
+		}
+	}
+	sort.Strings(repos)
+	for _, repo := range repos {
+		e.Gauge("gortex_watcher_state", "One for each repository's current file watcher condition.", 1, "repo", repo, "state", states[repo])
+	}
 }

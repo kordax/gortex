@@ -8,7 +8,7 @@ import re
 def main():
     root = Path(__file__).resolve().parent
     dashboards = sorted((root / "grafana/dashboards").glob("*.json"))
-    assert len(dashboards) == 4, "expected runtime, MCP, repository and SQLite dashboards"
+    assert len(dashboards) == 5, "expected runtime, MCP, indexing, repository and SQLite dashboards"
     uids = set()
     expressions = 0
     for path in dashboards:

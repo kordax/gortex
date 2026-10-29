@@ -69,8 +69,9 @@ cat deploy/observability/.state/grafana-password
 
 The password is generated once, never printed by the launcher, and excluded from Git. Its parent directory is private. The file is readable inside Grafana's unprivileged container through a Compose secret. Docker administrators can access container data and secrets.
 
-Grafana provisions four dashboards in the **Gortex** folder:
+Grafana provisions five dashboards in the **Gortex** folder:
 
+- **Indexing and edits:** how changed files reach the graph: patch latency, deferred changes that waited out a mutation slot, burst drains, derived passes and their framework share, per-repository watcher state and the time since each repository last received a change. This is the first place to look when agents see stale names or tools waiting on the graph.
 - **Runtime and readiness:** scrape health, graph readiness, enrichment, warmup, daemon CPU/RSS/PSS, child RSS, Go heap/GC/goroutines, sessions, cache memory and I/O.
 - **MCP requests:** completed call rate/outcomes, p50/p95/p99 latency, operation breakdown, in-flight calls and timed-out handlers still running.
 - **Repository snapshots:** cached per-repository files/nodes/edges/indexed state, aggregate availability, source and snapshot age.

@@ -13,6 +13,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/zzet/gortex/internal/observability"
 	"github.com/zzet/gortex/internal/thirdparty/fswatcher"
 	"go.uber.org/zap"
 
@@ -357,6 +358,16 @@ func (w *Watcher) currentMutationIndexer() *Indexer {
 		return w.currentIndexer()
 	}
 	return w.indexer
+}
+
+// metricRepo names the repository this watcher reports measurements under:
+// the construction-time Indexer's prefix, which never changes and needs no
+// registry lock.
+func (w *Watcher) metricRepo() string {
+	if w.indexer != nil {
+		return w.indexer.RepoPrefix()
+	}
+	return ""
 }
 
 // cloneSymbolChangeNodes detaches callback payloads from graph-owned node and
@@ -2237,6 +2248,7 @@ func (w *Watcher) drainStorm() {
 		w.logger.Warn("watcher: storm drain failed",
 			zap.Int("paths", len(paths)), zap.Error(err))
 	}
+	observability.Indexing.ObserveStormDrain(w.metricRepo(), len(paths), failed, time.Since(start))
 	w.logger.Info("watcher: storm drain complete",
 		zap.Int("paths", len(paths)),
 		zap.Int("reindexed", reindexed),
@@ -2578,6 +2590,7 @@ func (w *Watcher) patchGraphWithReceiptStateRawModern(
 	classification := pointMutationClassification(kind, result.DerivedInvalidation, priorFingerprint, freshFingerprint)
 	freshEdges := w.countFileEdges(freshNodes)
 
+	observability.Indexing.ObservePatch(idx.RepoPrefix(), time.Since(start))
 	ev := GraphChangeEvent{
 		FilePath: path,
 		// The per-repo Indexer's prefix IS the key this watcher is

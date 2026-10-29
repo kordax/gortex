@@ -22,6 +22,16 @@ tasks:
       - bash "{{.ROOT_DIR}}/scripts/install-local.sh"
       - '"{{.GORTEX}}" version'
 
+  test:changed:
+    desc: Test only the packages a change since BASE (origin/main) can affect, using the Go test cache
+    cmds:
+      - bash "{{.ROOT_DIR}}/scripts/test-changed.sh" {{.BASE | default "origin/main"}} {{.CLI_ARGS}}
+
+  test:
+    desc: Run the full suite exactly as CI does; the pre-push gate
+    cmds:
+      - go test -race -timeout=45m ./...
+
   restart:
     desc: Restart the daemon on the installed binary; running agent requests are interrupted
     preconditions:
