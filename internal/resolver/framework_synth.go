@@ -197,6 +197,15 @@ func UnstampSynthesized(e *graph.Edge) {
 type FrameworkSynthesizerSelection struct {
 	configured bool
 	names      map[string]struct{}
+	// facts lets a changed-file run skip the probed .NET passes in
+	// repositories that hold none of their facts. Nil runs every pass.
+	facts *FrameworkRepoFacts
+}
+
+// WithRepoFacts returns the selection carrying the store owner's fact memo.
+func (s FrameworkSynthesizerSelection) WithRepoFacts(facts *FrameworkRepoFacts) FrameworkSynthesizerSelection {
+	s.facts = facts
+	return s
 }
 
 // AllFrameworkSynthesizers returns the legacy, all-enabled selection.
@@ -335,6 +344,11 @@ var frameworkSynthLanguageFamilies = map[string][]string{
 	SynthSvelteKitLoad:       {"web"},
 	SynthRustScope:           {"rust"},
 	SynthPascalFormName:      {"pascal"},
+	// The Godot passes bind only GDScript calls, to scripts that
+	// project.godot autoloads, a preload const names or a scene connects.
+	SynthGodotAutoload:     {"godot"},
+	SynthGodotPreloadAlias: {"godot"},
+	SynthGodotConnection:   {"godot"},
 }
 
 type frameworkCandidateSummary struct {
@@ -877,6 +891,8 @@ func frameworkLanguageFamily(language string) string {
 		return "sql"
 	case "pascal", "object-pascal", "object_pascal":
 		return "pascal"
+	case "gdscript", "godot_project", "godot_resource":
+		return "godot"
 	case "vue", "svelte", "astro":
 		return "web"
 	case "objective-c++", "objc++", "objective-cpp":
@@ -1341,6 +1357,9 @@ func runFrameworkSynthesizersScoped(
 		fullReadCache = newFrameworkFullReadCache()
 	}
 	rep.ScopeMillis = time.Since(scopeStart).Milliseconds()
+	if len(filePaths) == 0 {
+		selection.facts.forget(executionScope)
+	}
 	for _, s := range defaultFrameworkSynthesizers() {
 		if !selection.allows(s.Name()) {
 			candidates.streams.releasePass(s.Name(), nil)
@@ -1350,7 +1369,8 @@ func runFrameworkSynthesizersScoped(
 		var n int
 		var bundle *frameworkPassCandidates
 		var passScope *frameworkScopedStore
-		if shouldRunFrameworkSynthesizer(s, executionScope, candidates) {
+		if shouldRunFrameworkSynthesizer(s, executionScope, candidates) &&
+			selection.facts.allow(g, s.Name(), executionScope, filePaths) {
 			if sf, ok := s.(synthFunc); ok {
 				bundle = candidates.streams.passStreams(g, sf.name)
 				switch {
@@ -1426,7 +1446,8 @@ func runFrameworkSynthesizersScoped(
 	// Receiver-type gate runs last: it corrects (demotes) already-bound C#
 	// member calls, so it must see the settled call graph.
 	demoteStart := time.Now()
-	if frameworkReceiverGateNeeded(executionScope, candidates) {
+	if frameworkReceiverGateNeeded(executionScope, candidates) &&
+		csharpFrontierCanDemote(filePaths, csharpHierarchyChanged, candidates) {
 		rep.ReceiverGated = demoteCSharpMisattributedMemberCallsScopedForFiles(
 			g, executionScope, filePaths, csharpHierarchyChanged,
 		)
@@ -1489,6 +1510,18 @@ func frameworkGDScriptGateNeeded(summary frameworkCandidateSummary) bool {
 		return summary.allMarkers[frameworkMarkerGDScript] > 0
 	}
 	return summary.scopedMarkers[frameworkMarkerGDScript] > 0
+}
+
+// csharpFrontierCanDemote narrows the receiver gate on an exact changed-file
+// frontier. Its candidates are the call edges leaving the frontier's files and
+// the calls entering their methods, and a demotion needs a C# caller and a C#
+// target, so a frontier holding no C# node cannot move a verdict. A changed
+// hierarchy re-judges calls outside the frontier and keeps the gate.
+func csharpFrontierCanDemote(filePaths []string, csharpHierarchyChanged bool, summary frameworkCandidateSummary) bool {
+	if summary.fullCensus || len(filePaths) == 0 || csharpHierarchyChanged {
+		return true
+	}
+	return summary.scoped["dotnet"] > 0
 }
 
 func frameworkReceiverGateNeeded(_ map[string]bool, summary frameworkCandidateSummary) bool {

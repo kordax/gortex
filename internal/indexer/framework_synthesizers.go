@@ -75,3 +75,12 @@ func (mi *MultiIndexer) frameworkSynthesizerSelection(
 	}
 	return resolver.AllFrameworkSynthesizers()
 }
+
+// frameworkRepoFacts returns the store's framework fact memo, created on first
+// use so indexers assembled without the constructor share the behavior.
+func (mi *MultiIndexer) frameworkRepoFacts() *resolver.FrameworkRepoFacts {
+	mi.frameworkFactsOnce.Do(func() {
+		mi.frameworkFacts = resolver.NewFrameworkRepoFacts()
+	})
+	return mi.frameworkFacts
+}

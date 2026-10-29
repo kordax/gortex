@@ -302,7 +302,7 @@ func (mi *MultiIndexer) runIncrementalDerivedPassesTopologyHeld(
 			scopedPrefixes,
 			frameworkFiles,
 			merged.CSharpHierarchyChanged,
-			mi.frameworkSynthesizerSelection(scopedPrefixes),
+			mi.frameworkSynthesizerSelection(scopedPrefixes).WithRepoFacts(mi.frameworkRepoFacts()),
 		)
 		report.FrameworkDuration = time.Since(phase)
 		report.Framework = framework.Total

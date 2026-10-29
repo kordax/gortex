@@ -223,6 +223,12 @@ type MultiIndexer struct {
 	// cause of "enrich:0" in daemon mode. Set by the daemon via
 	// SetSemanticManager before IndexAll / TrackRepo.
 	semanticMgr *semantic.Manager
+
+	// frameworkFacts remembers which repositories hold EF Core, MediatR and
+	// DI registration facts, so a changed-file framework pass can skip a
+	// repository without one. It lives as long as the store it describes.
+	frameworkFactsOnce sync.Once
+	frameworkFacts     *resolver.FrameworkRepoFacts
 }
 
 // SetEmbedder installs the embedding provider every per-repo indexer
@@ -1890,7 +1896,7 @@ func (mi *MultiIndexer) runGlobalGraphPassesTopologyHeld(
 		mi.graph,
 		changedPrefixes,
 		censusEligible,
-		mi.frameworkSynthesizerSelection(changedPrefixes),
+		mi.frameworkSynthesizerSelection(changedPrefixes).WithRepoFacts(mi.frameworkRepoFacts()),
 	)
 	mi.logger.Info("global pass: framework dispatch synthesis",
 		zap.Int("edges", fwRep.Total),
