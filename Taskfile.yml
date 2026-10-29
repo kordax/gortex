@@ -1,0 +1,38 @@
+version: '3'
+
+vars:
+  INSTALL_DIR: '{{.GORTEX_INSTALL_DIR | default (printf "%s/.local/bin" .HOME)}}'
+  GORTEX: '{{.INSTALL_DIR}}/gortex'
+
+tasks:
+  install:
+    desc: Install the latest fork release (or VERSION=v1.3.8) into INSTALL_DIR
+    env:
+      GORTEX_INSTALL_DIR: '{{.INSTALL_DIR}}'
+      GORTEX_VERSION: '{{.VERSION | default "latest"}}'
+    cmds:
+      - sh "{{.ROOT_DIR}}/scripts/install.sh"
+      - '"{{.GORTEX}}" version'
+
+  install:local:
+    desc: Build this checkout, uncommitted changes included, and install it into INSTALL_DIR
+    env:
+      GORTEX_INSTALL_DIR: '{{.INSTALL_DIR}}'
+    cmds:
+      - bash "{{.ROOT_DIR}}/scripts/install-local.sh"
+      - '"{{.GORTEX}}" version'
+
+  restart:
+    desc: Restart the daemon on the installed binary; running agent requests are interrupted
+    preconditions:
+      - sh: 'test -x "{{.GORTEX}}"'
+        msg: 'No gortex at {{.GORTEX}}. Run task install first.'
+    cmds:
+      - '"{{.GORTEX}}" daemon restart'
+      - '"{{.GORTEX}}" daemon status'
+
+  update:
+    desc: Install the latest release and restart the daemon on it
+    cmds:
+      - task: install
+      - task: restart
