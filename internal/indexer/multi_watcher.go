@@ -1123,6 +1123,25 @@ func (mw *MultiWatcher) DegradedReason() string {
 	return ""
 }
 
+// DegradedReasonFor returns the degraded reason of the one repository a read
+// targets, or "" when that repository's watcher is healthy. The freshness
+// rider rides on a single file, so another repository's failed watcher says
+// nothing about whether this file's edits reach the graph.
+func (mw *MultiWatcher) DegradedReasonFor(prefix string) string {
+	mw.mu.Lock()
+	defer mw.mu.Unlock()
+	if failure, dead := mw.startFailures[prefix]; dead {
+		return qualifyRepoReason(prefix,
+			"the file watcher failed to start — edits are not reaching the graph until the daemon restarts ("+failure+")")
+	}
+	if w := mw.watchers[prefix]; w != nil {
+		if r := w.DegradedReason(); r != "" {
+			return qualifyRepoReason(prefix, r)
+		}
+	}
+	return ""
+}
+
 func qualifyRepoReason(prefix, reason string) string {
 	if prefix == "" {
 		return reason

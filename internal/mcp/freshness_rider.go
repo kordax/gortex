@@ -75,7 +75,7 @@ func (s *Server) freshnessRiderFor(toolName string, req mcp.CallToolRequest) map
 	// or FD exhaustion) the graph may silently lag every live edit, not just
 	// this file — a condition distinct from per-file staleness. Surface it even
 	// when the targeted file itself looks fresh.
-	frozen := s.watchDegradedReason()
+	frozen := s.watchDegradedReason(owner.RepoPrefix())
 
 	if state == indexer.FileFresh && !mismatch && len(staleLangs) == 0 && frozen == "" {
 		return nil
@@ -119,11 +119,14 @@ func (s *Server) freshnessRiderFor(toolName string, req mcp.CallToolRequest) map
 // exhaustion) when the index may be silently frozen, or "" when watching is
 // healthy or unavailable. Read through an interface assertion so the rider
 // stays decoupled from the concrete *indexer.Watcher behind the server's
-// watcher field.
-func (s *Server) watchDegradedReason() string {
+// watcher field. In daemon mode the reason is the owning repository's alone.
+func (s *Server) watchDegradedReason(prefix string) string {
 	watcher := s.currentWatcher()
 	if watcher == nil {
 		return ""
+	}
+	if dr, ok := watcher.(interface{ DegradedReasonFor(string) string }); ok {
+		return dr.DegradedReasonFor(prefix)
 	}
 	if dr, ok := watcher.(interface{ DegradedReason() string }); ok {
 		return dr.DegradedReason()

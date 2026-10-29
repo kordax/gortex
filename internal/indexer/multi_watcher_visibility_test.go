@@ -28,6 +28,11 @@ func TestMultiWatcherReportsRepoThatNeverStarted(t *testing.T) {
 	reason := mw.DegradedReason()
 	require.NotEmpty(t, reason, "an unwatched repository must not read as healthy")
 	require.Contains(t, reason, "repo-a", "the reason must name the repository that is not being watched")
+
+	// A read inside repo-b must not carry repo-a's outage: the per-file
+	// freshness rider asks only about the repository that owns the file.
+	require.Contains(t, mw.DegradedReasonFor("repo-a"), "repo-a")
+	require.Empty(t, mw.DegradedReasonFor("repo-b"), "a healthy repository must not inherit another repository's watcher failure")
 }
 
 // TestMultiWatcherHealthyWhenAllReposStart guards against the inverse: a fully
