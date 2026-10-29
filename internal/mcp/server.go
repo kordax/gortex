@@ -2440,10 +2440,31 @@ func (s *Server) sessionLocality(ctx context.Context) (repoPrefix, projectID str
 		return "", ""
 	}
 	// Ensure scope is resolved (populates scopeRepoPrefix).
-	s.sessionScope(ctx)
+	sessWS, _, _ := s.sessionScope(ctx)
+	if prefix, proj, ok := s.requestViewLocality(ctx, sessWS); ok {
+		return prefix, proj
+	}
 	ss.mu.Lock()
 	defer ss.mu.Unlock()
 	return ss.scopeRepoPrefix, ss.scopeProjectID
+}
+
+// requestViewLocality returns the home repository of the view this request
+// reads through, when that view is a checkout of another repository in the
+// session's workspace. A caller naming view:{kind:"worktree"} for a sibling
+// repository asks about that repository; ranking its hits below the cwd's own
+// repository answered a question about the wrong project. The workspace
+// boundary stays the session's: only locality follows the view.
+func (s *Server) requestViewLocality(ctx context.Context, sessWS string) (repoPrefix, projectID string, ok bool) {
+	view := requestViewFromContext(ctx)
+	if view == nil || view.viewRoot == "" || s.multiIndexer == nil {
+		return "", "", false
+	}
+	ws, proj, prefix, found := s.multiIndexer.ScopeForCWD(view.viewRoot)
+	if !found || prefix == "" || (sessWS != "" && ws != sessWS) {
+		return "", "", false
+	}
+	return prefix, proj, true
 }
 
 // sessionWorkspaceRepos returns {name, path} for every repo in the

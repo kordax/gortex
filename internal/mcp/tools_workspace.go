@@ -98,13 +98,20 @@ func (s *Server) handleWorkspaceInfo(ctx context.Context, req mcp.CallToolReques
 // of the process-global bind, which is nil on the daemon.
 func (s *Server) buildWorkspaceInfoPayload(ctx context.Context) map[string]any {
 	if sessWS, sessProj, bound := s.sessionScope(ctx); bound {
-		return map[string]any{
+		payload := map[string]any{
 			"mode":             "workspace",
 			"workspace":        sessWS,
 			"project":          sessProj,
 			"members":          s.sessionWorkspaceRepos(ctx),
 			"isolation_bounds": sessWS,
 		}
+		// An explicit view of a sibling repository answers for that
+		// repository; the cwd's own project is still reported beside it.
+		if _, viewProj, ok := s.requestViewLocality(ctx, sessWS); ok && viewProj != sessProj {
+			payload["project"] = viewProj
+			payload["session_project"] = sessProj
+		}
+		return payload
 	}
 	// No session workspace: embedded single-repo / control client.
 	return map[string]any{
