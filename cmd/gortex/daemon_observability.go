@@ -93,7 +93,7 @@ func startDaemonObservability(cmd *cobra.Command, srv *daemon.Server, controller
 		}
 	}
 	metricsAddress := daemonDashboardAddress(cmd, daemonMetricsAddr, configuredMetricsAddr)
-	dashboard = &daemonDashboard{ctx: ctx, handler: diagnostics.LocalOnly(metricsMux), logger: logger, preferred: metricsAddress}
+	dashboard = &daemonDashboard{ctx: ctx, handler: diagnostics.LocalSameOrigin(metricsMux), logger: logger, preferred: metricsAddress}
 	if controller != nil {
 		controller.dashboard = dashboard
 	}

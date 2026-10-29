@@ -45,6 +45,42 @@ func TestLocalDiagnosticsBoundary(t *testing.T) {
 	require.NoError(t, listener.Close())
 }
 
+// The dashboard page loads its own stylesheet, script and data; a browser marks
+// each of those requests same-origin, which LocalOnly refused, so the page never
+// rendered. LocalSameOrigin admits exactly those and nothing a foreign site sends.
+func TestLocalDashboardBoundary(t *testing.T) {
+	for _, test := range []struct {
+		name, host, origin, site string
+		status                   int
+	}{
+		{"curl", "127.0.0.1:9474", "", "", 204},
+		{"address_bar", "127.0.0.1:9474", "", "none", 204},
+		{"own_asset", "127.0.0.1:9474", "", "same-origin", 204},
+		{"own_fetch", "127.0.0.1:9474", "http://127.0.0.1:9474", "same-origin", 204},
+		{"localhost_fetch", "localhost:9474", "http://localhost:9474", "same-origin", 204},
+		{"sibling_port", "127.0.0.1:9474", "http://127.0.0.1:3000", "same-site", 403},
+		{"foreign_origin", "127.0.0.1:9474", "https://attacker.example", "cross-site", 403},
+		{"forged_same_origin", "127.0.0.1:9474", "https://attacker.example", "same-origin", 403},
+		{"dns_rebinding", "attacker.example:9474", "http://attacker.example:9474", "same-origin", 403},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			r := httptest.NewRequest("GET", "http://127.0.0.1/", nil)
+			r.Host = test.host
+			r.Header.Set("Origin", test.origin)
+			r.Header.Set("Sec-Fetch-Site", test.site)
+			w := httptest.NewRecorder()
+			LocalSameOrigin(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(204) })).ServeHTTP(w, r)
+			assert.Equal(t, test.status, w.Code)
+		})
+	}
+	r := httptest.NewRequest("GET", "http://127.0.0.1/", nil)
+	r.Host = "127.0.0.1:9475"
+	r.Header.Set("Sec-Fetch-Site", "same-origin")
+	w := httptest.NewRecorder()
+	LocalOnly(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(204) })).ServeHTTP(w, r)
+	assert.Equal(t, http.StatusForbidden, w.Code, "profiles keep refusing every browser request")
+}
+
 func TestProfileBoundsAndSnapshot(t *testing.T) {
 	handler := ProfileHandler()
 	for _, path := range []string{"cpu?seconds=0", "cpu?seconds=61", "cpu?seconds=oops", "trace?seconds=31", "block?seconds=31", "heap?debug=1"} {

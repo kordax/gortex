@@ -21,6 +21,18 @@ const maxProfileBytes = 32 << 20
 // LocalOnly rejects browser origins and non-loopback Hosts, including DNS rebinding.
 // It complements a loopback listener; it is not authentication for a public bind.
 func LocalOnly(next http.Handler) http.Handler {
+	return localGuard(next, false)
+}
+
+// LocalSameOrigin is LocalOnly for a page served from the listener itself: it
+// also admits the requests that page makes for its own assets and data, which a
+// browser marks same-origin. Every other site, and every non-loopback Host, is
+// still refused.
+func LocalSameOrigin(next http.Handler) http.Handler {
+	return localGuard(next, true)
+}
+
+func localGuard(next http.Handler, sameOrigin bool) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("Cache-Control", "no-store")
@@ -29,7 +41,8 @@ func LocalOnly(next http.Handler) http.Handler {
 			host = h
 		}
 		ip := net.ParseIP(strings.Trim(host, "[]"))
-		if r.Header.Get("Origin") != "" || (r.Header.Get("Sec-Fetch-Site") != "" && r.Header.Get("Sec-Fetch-Site") != "none") || (host != "localhost" && (ip == nil || !ip.IsLoopback())) {
+		loopback := host == "localhost" || (ip != nil && ip.IsLoopback())
+		if !loopback || !localBrowserAllowed(r, sameOrigin) {
 			http.Error(w, "local diagnostics only", http.StatusForbidden)
 			return
 		}
@@ -40,6 +53,23 @@ func LocalOnly(next http.Handler) http.Handler {
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+// localBrowserAllowed admits requests no browser page initiated and, when
+// sameOrigin is set, requests from a page this very Host served.
+func localBrowserAllowed(r *http.Request, sameOrigin bool) bool {
+	origin := r.Header.Get("Origin")
+	site := r.Header.Get("Sec-Fetch-Site")
+	if origin == "" && (site == "" || site == "none") {
+		return true
+	}
+	if !sameOrigin {
+		return false
+	}
+	if site != "" && site != "same-origin" {
+		return false
+	}
+	return origin == "" || origin == "http://"+r.Host
 }
 
 // ListenLocal requires a literal loopback address (or localhost), never a wildcard.
